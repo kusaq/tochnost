@@ -7,4 +7,4 @@ from infra.redis.redis_api import RedisAPI
 @dataclass(slots=True)
 class BaseService:
     uow: TimeScaleDBUnitOfWork
-    redis: RedisAPI | None = None
+    redis: RedisAPI
