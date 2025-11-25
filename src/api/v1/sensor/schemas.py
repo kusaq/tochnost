@@ -2,7 +2,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
-class Sensor1Base(BaseModel):
+class Sensor1Values(BaseModel):
     encoder1: int
     encoder2: int
     encoder3: int
@@ -29,22 +29,13 @@ class Sensor1Base(BaseModel):
     mm_bolt_height_right_inner: float = Field(description="высота внутреннего болта правого рельса в мм")
     mm_bolt_height_right_outer: float = Field(description="высота внешнего болта правого рельса в мм")
 
+
+class Sensor1Create(BaseModel):
     timestamp: datetime = Field(description="метка времени измерения")
-    rail_id: int = Field(description="идентификатор рельса")
+    values: Sensor1Values = Field(description="Значения")
 
 
-class Sensor1Create(Sensor1Base):
-    pass
-
-
-class Sensor1Read(Sensor1Base):
-    sensor1_id: int
-    created_at: datetime | None = None
-
-    model_config = dict(from_attributes=True)
-
-
-class Sensor2Base(BaseModel):
+class Sensor2Values(BaseModel):
     resistance_1: float = Field(description="Сопротивление 1")
     resistance_2: float = Field(description="Сопротивление 2 (<=4)")
 
@@ -57,16 +48,7 @@ class Sensor2Base(BaseModel):
     revolutions_pc_alt: int = Field(description="Обороты ПЧ alt")
     status_pc: int = Field(description="Статус ПЧ")
 
+
+class Sensor2Create(BaseModel):
     timestamp: datetime = Field(description="метка времени измерения")
-    rail_id: int = Field(description="идентификатор рельса")
-
-
-class Sensor2Create(Sensor2Base):
-    pass
-
-
-class Sensor2Read(Sensor2Base):
-    sensor2_id: int
-    created_at: datetime | None = None
-
-    model_config = dict(from_attributes=True)
+    values: Sensor2Values = Field(description="Значения")
