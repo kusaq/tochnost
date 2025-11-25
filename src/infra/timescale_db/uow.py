@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from infra.timescale_db.ts_db import get_db
 from infra.timescale_db.storage.user import UserStorage
+from infra.timescale_db.storage.rail import RailStorage
+from infra.timescale_db.storage.sensor1 import Sensor1Storage
+from infra.timescale_db.storage.sensor2 import Sensor2Storage
 
 
 class TimeScaleDBUnitOfWork:
@@ -15,6 +18,9 @@ class TimeScaleDBUnitOfWork:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.user = UserStorage(db)
+        self.rail = RailStorage(db)
+        self.sensor1 = Sensor1Storage(db)
+        self.sensor2 = Sensor2Storage(db)
 
 
 async def get_uow() -> AsyncIterator[TimeScaleDBUnitOfWork]:
