@@ -20,6 +20,3 @@ class Rail(Base, CreateTimestampMixin):
     end_time: Mapped[datetime | None] = mapped_column(nullable=True)
 
     sensor1_records = relationship("Sensor1", back_populates="rail")
-    sensor2_records = relationship("Sensor2", back_populates="rail")
-
-

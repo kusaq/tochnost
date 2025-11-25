@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Float, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, Float
+from sqlalchemy.orm import Mapped, mapped_column
 
 from infra.timescale_db.mixins import CreateTimestampMixin
 from infra.timescale_db.models.base import Base
@@ -25,8 +25,3 @@ class Sensor2(Base, CreateTimestampMixin):
     status_pc: Mapped[int] = mapped_column("status_PC", BigInteger, nullable=False, comment="Статус ПЧ")
 
     timestamp: Mapped[datetime] = mapped_column(nullable=False, comment="метка времени измерения")
-
-    rail_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("rail.rail_id"), nullable=False, comment="идентификатор рельса")
-    rail = relationship("Rail", back_populates="sensor2_records")
-
-

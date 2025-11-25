@@ -42,5 +42,3 @@ class Sensor1(Base, CreateTimestampMixin):
 
     rail_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("rail.rail_id"), nullable=False, comment="идентификатор рельса")
     rail = relationship("Rail", back_populates="sensor1_records")
-
-

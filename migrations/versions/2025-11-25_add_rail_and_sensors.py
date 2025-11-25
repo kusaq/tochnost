@@ -1,8 +1,8 @@
 """add rail and sensors
 
-Revision ID: a8dad5e04156
+Revision ID: 836aca8686d2
 Revises: 6ac740df9ddd
-Create Date: 2025-11-24 20:13:17.299926
+Create Date: 2025-11-25 20:33:29.888651
 
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "a8dad5e04156"
+revision: str = "836aca8686d2"
 down_revision: Union[str, Sequence[str], None] = "6ac740df9ddd"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -32,7 +32,82 @@ def upgrade() -> None:
         sa.Column("object_name", sa.String(length=255), nullable=True),
         sa.Column("fastening_type", sa.String(length=255), nullable=True),
         sa.Column("sleepers", sa.String(length=255), nullable=True),
+        sa.Column("start_time", sa.DateTime(), nullable=True),
+        sa.Column("end_time", sa.DateTime(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("rail_id"),
+    )
+    op.create_table(
+        "sensor_2",
+        sa.Column(
+            "sensor2_id", sa.BigInteger(), autoincrement=True, nullable=False
+        ),
+        sa.Column(
+            "resistance_1",
+            sa.Float(),
+            nullable=False,
+            comment="Сопротивление 1",
+        ),
+        sa.Column(
+            "resistance_2",
+            sa.Float(),
+            nullable=False,
+            comment="Сопротивление 2 (<=4)",
+        ),
+        sa.Column(
+            "moment_PC", sa.BigInteger(), nullable=False, comment="Момент ПЧ"
+        ),
+        sa.Column(
+            "moment_percent",
+            sa.BigInteger(),
+            nullable=False,
+            comment="Момент %",
+        ),
+        sa.Column(
+            "moment_amperage_percent",
+            sa.BigInteger(),
+            nullable=False,
+            comment="Момент (т) %",
+        ),
+        sa.Column(
+            "turnover", sa.BigInteger(), nullable=False, comment="Обороты ПЧ"
+        ),
+        sa.Column(
+            "amperage", sa.BigInteger(), nullable=False, comment="Ток ПЧ"
+        ),
+        sa.Column(
+            "phase_amperage",
+            sa.BigInteger(),
+            nullable=False,
+            comment="Фазный ток",
+        ),
+        sa.Column(
+            "revolutions_PC_alt",
+            sa.BigInteger(),
+            nullable=False,
+            comment="Обороты ПЧ alt",
+        ),
+        sa.Column(
+            "status_PC", sa.BigInteger(), nullable=False, comment="Статус ПЧ"
+        ),
+        sa.Column(
+            "timestamp",
+            sa.DateTime(),
+            nullable=False,
+            comment="метка времени измерения",
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("sensor2_id"),
     )
     op.create_table(
         "sensor_1",
@@ -180,90 +255,13 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("sensor1_id"),
     )
-    op.create_table(
-        "sensor_2",
-        sa.Column(
-            "sensor2_id", sa.BigInteger(), autoincrement=True, nullable=False
-        ),
-        sa.Column(
-            "resistance_1",
-            sa.Float(),
-            nullable=False,
-            comment="Сопротивление 1",
-        ),
-        sa.Column(
-            "resistance_2",
-            sa.Float(),
-            nullable=False,
-            comment="Сопротивление 2 (<=4)",
-        ),
-        sa.Column(
-            "moment_PC", sa.BigInteger(), nullable=False, comment="Момент ПЧ"
-        ),
-        sa.Column(
-            "moment_percent",
-            sa.BigInteger(),
-            nullable=False,
-            comment="Момент %",
-        ),
-        sa.Column(
-            "moment_amperage_percent",
-            sa.BigInteger(),
-            nullable=False,
-            comment="Момент (т) %",
-        ),
-        sa.Column(
-            "turnover", sa.BigInteger(), nullable=False, comment="Обороты ПЧ"
-        ),
-        sa.Column(
-            "amperage", sa.BigInteger(), nullable=False, comment="Ток ПЧ"
-        ),
-        sa.Column(
-            "phase_amperage",
-            sa.BigInteger(),
-            nullable=False,
-            comment="Фазный ток",
-        ),
-        sa.Column(
-            "revolutions_PC_alt",
-            sa.BigInteger(),
-            nullable=False,
-            comment="Обороты ПЧ alt",
-        ),
-        sa.Column(
-            "status_PC", sa.BigInteger(), nullable=False, comment="Статус ПЧ"
-        ),
-        sa.Column(
-            "timestamp",
-            sa.DateTime(),
-            nullable=False,
-            comment="метка времени измерения",
-        ),
-        sa.Column(
-            "rail_id",
-            sa.BigInteger(),
-            nullable=False,
-            comment="идентификатор рельса",
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["rail_id"],
-            ["rail.rail_id"],
-        ),
-        sa.PrimaryKeyConstraint("sensor2_id"),
-    )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_table("sensor_2")
     op.drop_table("sensor_1")
+    op.drop_table("sensor_2")
     op.drop_table("rail")
     # ### end Alembic commands ###
