@@ -2,6 +2,7 @@ from api.v1.base.service import BaseService
 from api.v1.sensor.manager import SensorManager
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 from infra.timescale_db.models import Rail, Sensor1, Sensor2
+from infra.timescale_db.models.rail import RailStatus
 
 
 class SensorService(BaseService):
@@ -11,7 +12,7 @@ class SensorService(BaseService):
         if event and event.get("type") == "start":
             rail = Rail(
                 name=None,
-                status="processing",
+                status=RailStatus.IN_PROGRESS,
                 object_name=None,
                 fastening_type=None,
                 sleepers=None,
@@ -25,7 +26,7 @@ class SensorService(BaseService):
             rail = await self.uow.rail.get_by_id(rail_id)
             if rail:
                 rail.end_time = event["end_time"]
-                rail.status = "completed"
+                rail.status = RailStatus.COMPLETED
                 await self.uow.rail.update(rail)
                 return
 

@@ -8,6 +8,7 @@ from infra.timescale_db.storage.user import UserStorage
 from infra.timescale_db.storage.rail import RailStorage
 from infra.timescale_db.storage.sensor1 import Sensor1Storage
 from infra.timescale_db.storage.sensor2 import Sensor2Storage
+from infra.timescale_db.storage.threshold import ThresholdStorage
 
 
 class TimeScaleDBUnitOfWork:
@@ -21,6 +22,7 @@ class TimeScaleDBUnitOfWork:
         self.rail = RailStorage(db)
         self.sensor1 = Sensor1Storage(db)
         self.sensor2 = Sensor2Storage(db)
+        self.threshold = ThresholdStorage(db)
 
 
 async def get_uow() -> AsyncIterator[TimeScaleDBUnitOfWork]:

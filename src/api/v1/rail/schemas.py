@@ -11,6 +11,7 @@ class RailRead(BaseModel):
     sleepers: str | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+    errors_count: int = 0
     created_at: datetime | None = None
 
     model_config = dict(from_attributes=True)
@@ -24,6 +25,7 @@ class RailUpdate(BaseModel):
     sleepers: str | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+    errors_count: int | None = None
 
 
 class RailsListResponse(BaseModel):

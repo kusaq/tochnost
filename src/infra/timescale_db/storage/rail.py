@@ -77,5 +77,3 @@ class RailStorage(PostgresStorage[Rail]):
         res = await self._db.execute(stmt)
         deleted = res.scalars().all()
         return list(deleted)
-
-
