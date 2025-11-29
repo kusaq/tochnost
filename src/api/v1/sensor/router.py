@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
-from api.v1.auth.dependencies import CurrentUserDep
 from api.v1.sensor.dependencies import SensorServiceDep
+from api.v1.sensor.manager import SensorManagerDep
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
@@ -11,15 +11,14 @@ router = APIRouter(prefix="/sensor", tags=["Sensor"])
 async def save_first_sensor_data(
     sensor_data: Sensor1Create,
     sensor_service: SensorServiceDep,
-    user: CurrentUserDep
-):
-    ...
+    manager: SensorManagerDep
+) -> None:
+    await sensor_service.add_sensor1_data(sensor_data, manager)
 
 
 @router.post("/second")
 async def save_second_sensor_data(
     sensor_data: Sensor2Create,
-    sensor_service: SensorServiceDep,
-    user: CurrentUserDep
+    sensor_service: SensorServiceDep
 ) -> None:
     await sensor_service.add_sensor2_data(sensor_data)
