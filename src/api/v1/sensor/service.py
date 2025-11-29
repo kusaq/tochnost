@@ -1,3 +1,4 @@
+from api.v1.sensor.schemas import ThresholdEntry, Thresholds
 from api.v1.base.service import BaseService
 from api.v1.sensor.manager import SensorManager
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
@@ -6,6 +7,26 @@ from infra.timescale_db.models.rail import RailStatus
 
 
 class SensorService(BaseService):
+    THRESHOLDS_CACHE_KEY = "thresholds:all"
+
+    async def get_threshold_data(self) -> Thresholds:
+        cached = await self.redis.get(self.THRESHOLDS_CACHE_KEY)
+        if cached:
+            return Thresholds.model_validate_json(cached)
+
+        items = await self.uow.threshold.list_all()
+        thresholds_dict: dict[str, ThresholdEntry] = {
+            t.value: ThresholdEntry(
+                min_value=t.min_value,
+                max_value=t.max_value,
+                is_critical=t.is_critical,
+            )
+            for t in items
+        }
+        thresholds_model = Thresholds(thresholds=thresholds_dict)
+        await self.redis.set(self.THRESHOLDS_CACHE_KEY, thresholds_model.model_dump_json(), expire=300)
+        return thresholds_model
+
     async def add_sensor1_data(self, sensor1_data: Sensor1Create, manager: SensorManager) -> None:
         rail_id, event = await manager.assign_rail_for_sensor1(sensor1_data)
 

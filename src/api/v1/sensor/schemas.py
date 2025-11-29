@@ -152,3 +152,13 @@ class Sensor2Create(BaseModel):
             if getattr(dt, "tzinfo", None) is not None and dt.utcoffset() is not None:
                 dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
+
+
+class ThresholdEntry(BaseModel):
+    min_value: float
+    max_value: float
+    is_critical: bool
+
+
+class Thresholds(BaseModel):
+    thresholds: dict[str, ThresholdEntry]
