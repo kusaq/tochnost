@@ -1,5 +1,16 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
+
 from pydantic import BaseModel, Field, field_validator, AliasChoices
+
+
+@dataclass(slots=True)
+class RailSession:
+    rail_id: int
+    start_time: datetime
+    end_time: datetime | None
+    last_mm_along_rail: int
+    last_timestamp: datetime
 
 
 class Sensor1Values(BaseModel):

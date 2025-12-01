@@ -1,12 +1,23 @@
-from api.v1.sensor.schemas import ThresholdEntry, Thresholds
+import asyncio
+from collections import deque
+from datetime import datetime
+from typing import Deque
+
+from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession
 from api.v1.base.service import BaseService
-from api.v1.sensor.manager import SensorManager
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 from infra.timescale_db.models import Rail, Sensor1, Sensor2
 from infra.timescale_db.models.rail import RailStatus
 
 
 class SensorService(BaseService):
+    _lock = asyncio.Lock()
+
+    _active: RailSession | None = None
+
+    _closed_keep_limit = 10
+    _closed: Deque[RailSession] = deque(maxlen=_closed_keep_limit)
+
     THRESHOLDS_CACHE_KEY = "thresholds:all"
 
     async def get_threshold_data(self) -> Thresholds:
@@ -27,73 +38,71 @@ class SensorService(BaseService):
         await self.redis.set(self.THRESHOLDS_CACHE_KEY, thresholds_model.model_dump_json(), expire=300)
         return thresholds_model
 
-    async def add_sensor1_data(self, sensor1_data: Sensor1Create, manager: SensorManager) -> None:
-        rail_id, event = await manager.assign_rail_for_sensor1(sensor1_data)
-
-        if event and event.get("type") == "start":
-            rail = Rail(
-                name=None,
-                status=RailStatus.IN_PROGRESS,
-                object_name=None,
-                fastening_type=None,
-                sleepers=None,
-                start_time=event["start_time"],
-                end_time=None,
-            )
-            rail = await self.uow.rail.add(rail)
-            await manager.bind_active_rail(rail.rail_id)
-            rail_id = rail.rail_id
-        elif event and event.get("type") == "close" and rail_id is not None:
-            rail = await self.uow.rail.get_by_id(rail_id)
-            if rail:
-                rail.end_time = event["end_time"]
-                rail.status = RailStatus.COMPLETED
-                await self.uow.rail.update(rail)
-                return
-
-        if rail_id is None:
+    async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
+        if not self._active:
             return
 
-        await self.uow.sensor1.add(
-            Sensor1(
-                encoder1=sensor1_data.values.encoder1,
-                encoder2=sensor1_data.values.encoder2,
-                encoder3=sensor1_data.values.encoder3,
-                encoder4=sensor1_data.values.encoder4,
-                mm_along_rail=sensor1_data.values.mm_along_rail,
-                laser_on_rail_left=sensor1_data.values.laser_on_rail_left,
-                laser_on_rail_right=sensor1_data.values.laser_on_rail_right,
-                laser_on_tie_left=sensor1_data.values.laser_on_tie_left,
-                laser_on_tie_right=sensor1_data.values.laser_on_tie_right,
-                mm_gauge=sensor1_data.values.mm_gauge,
-                mm_side_wear_left=sensor1_data.values.mm_side_wear_left,
-                mm_side_wear_right=sensor1_data.values.mm_side_wear_right,
-                mm_vertical_wear_left=sensor1_data.values.mm_vertical_wear_left,
-                mm_vertical_wear_right=sensor1_data.values.mm_vertical_wear_right,
-                rad_rail_tilt_left=sensor1_data.values.rad_rail_tilt_left,
-                rad_rail_tilt_right=sensor1_data.values.rad_rail_tilt_right,
-                mm_bolt_height_left_inner=sensor1_data.values.mm_bolt_height_left_inner,
-                mm_bolt_height_left_outer=sensor1_data.values.mm_bolt_height_left_outer,
-                mm_bolt_height_right_inner=sensor1_data.values.mm_bolt_height_right_inner,
-                mm_bolt_height_right_outer=sensor1_data.values.mm_bolt_height_right_outer,
-                timestamp=sensor1_data.timestamp,
-                rail_id=rail_id,
-            )
+    async def add_sensor1_data(self, data: Sensor1Create) -> None:
+        async with self._lock:
+            rail_id = self.is_in_closed(data.timestamp)
+            if rail_id is not None:
+                await self.uow.sensor1.add(
+                    Sensor1(rail_id=rail_id, timestamp=data.timestamp, **data.values.model_dump())
+                )
+                return
+
+            if data.timestamp < self._active.start_time:
+                return
+
+            if self._active:
+                if data.values.mm_along_rail >= self._active.last_mm_along_rail:
+                    self._active.last_mm_along_rail = data.values.mm_along_rail
+                    self._active.last_timestamp = data.timestamp
+                    await self.uow.sensor1.add(
+                        Sensor1(
+                            rail_id=self._active.rail_id,
+                            timestamp=data.timestamp,
+                            **data.values.model_dump(),
+                        )
+                    )
+                elif data.values.mm_along_rail == 0:
+                    await self.close_active_rail()
+                return
+
+            if data.values.mm_along_rail > 0:
+                await self.bind_active_rail(data)
+            return
+
+
+    async def close_active_rail(self) -> None:
+        completed_rail = await self.uow.rail.update_fields(
+            status=RailStatus.COMPLETED,
+            rail_id=self._active.rail_id,
+            end_time=self._active.last_timestamp
+        )
+        self._active.end_time = completed_rail.end_time
+        self._closed.append(self._active)
+        self._active = None
+
+    async def bind_active_rail(self, data: Sensor1Create) -> None:
+        rail = await self.uow.rail.add(Rail(start_time=data.timestamp))
+        self._active = RailSession(
+            rail_id=rail.rail_id,
+            start_time=data.timestamp,
+            end_time=None,
+            last_mm_along_rail=data.values.mm_along_rail,
+            last_timestamp=data.timestamp,
         )
 
-    async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
-        await self.uow.sensor2.add(
-            Sensor2(
-            timestamp=sensor2_data.timestamp,
-            resistance_1=sensor2_data.values.resistance_1,
-            resistance_2=sensor2_data.values.resistance_2,
-            moment_pc=sensor2_data.values.moment_pc,
-            moment_percent=sensor2_data.values.moment_percent,
-            moment_amperage_percent=sensor2_data.values.moment_amperage_percent,
-            turnover=sensor2_data.values.turnover,
-            amperage=sensor2_data.values.amperage,
-            phase_amperage=sensor2_data.values.phase_amperage,
-            revolutions_pc_alt=sensor2_data.values.revolutions_pc_alt,
-            status_pc=sensor2_data.values.status_pc,
-        )
-        )
+    def is_in_closed(self, ts: datetime) -> int | None:
+        """
+        Проверяет, входит ли ts в какой-то из интервалов.
+        """
+        for session in reversed(self._closed):
+            if ts < session.start_time:
+                continue
+            if ts <= session.end_time:
+                return session.rail_id
+            if ts > session.end_time:
+                break
+        return None
