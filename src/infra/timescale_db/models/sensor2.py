@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Float, BigInteger as SA_BigInteger, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, Float, ForeignKey, Integer
+from sqlalchemy.orm import Mapped, mapped_column
 
 from infra.timescale_db.mixins import CreateTimestampMixin
 from infra.timescale_db.models.base import Base
@@ -11,19 +11,26 @@ class Sensor2(Base, CreateTimestampMixin):
     __tablename__ = "sensor_2"
 
     sensor2_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    screw_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("screw.screw_id"), nullable=False, comment="идентификатор гайки")
 
-    resistance_1: Mapped[float] = mapped_column(Float, nullable=False, comment="Сопротивление 1")
-    resistance_2: Mapped[float] = mapped_column("resistance_2", Float, nullable=False, comment="Сопротивление 2 (<=4)")
 
-    moment_pc: Mapped[int] = mapped_column("moment_PC", BigInteger, nullable=False, comment="Момент ПЧ")
-    moment_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Момент %")
-    moment_amperage_percent: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Момент (т) %")
-    turnover: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Обороты ПЧ")
-    amperage: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Ток ПЧ")
-    phase_amperage: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="Фазный ток")
-    revolutions_pc_alt: Mapped[int] = mapped_column("revolutions_PC_alt", BigInteger, nullable=False, comment="Обороты ПЧ alt")
-    status_pc: Mapped[int] = mapped_column("status_PC", BigInteger, nullable=False, comment="Статус ПЧ")
+    resistance: Mapped[float] = mapped_column(Float, nullable=False, comment="Сопротивление")
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, comment="Температура")
+    humidity: Mapped[float] = mapped_column(Float, nullable=False, comment="Влажность %")
+
+    frequency_status_1: Mapped[int] = mapped_column(Integer, nullable=False, comment="Состояние ПЧ 1")
+    frequency_status_2: Mapped[int] = mapped_column(Integer, nullable=False, comment="Состояние ПЧ 2")
+    frequency_status_3: Mapped[int] = mapped_column(Integer, nullable=False, comment="Состояние ПЧ 3")
+    frequency_status_4: Mapped[int] = mapped_column(Integer, nullable=False, comment="Состояние ПЧ 4")
+
+    frequency_torque_1: Mapped[int] = mapped_column(Integer, nullable=False, comment="Момент ПЧ 1")
+    frequency_torque_2: Mapped[int] = mapped_column(Integer, nullable=False, comment="Момент ПЧ 2")
+    frequency_torque_3: Mapped[int] = mapped_column(Integer, nullable=False, comment="Момент ПЧ 3")
+    frequency_torque_4: Mapped[int] = mapped_column(Integer, nullable=False, comment="Момент ПЧ 4")
+
+    converter_frequency_1: Mapped[int] = mapped_column(Integer, nullable=False, comment="Частота ПЧ 1")
+    converter_frequency_2: Mapped[int] = mapped_column(Integer, nullable=False, comment="Частота ПЧ 2")
+    converter_frequency_3: Mapped[int] = mapped_column(Integer, nullable=False, comment="Частота ПЧ 3")
+    converter_frequency_4: Mapped[int] = mapped_column(Integer, nullable=False, comment="Частота ПЧ 4")
 
     timestamp: Mapped[datetime] = mapped_column(nullable=False, comment="метка времени измерения")
-    rail_id: Mapped[int | None] = mapped_column(SA_BigInteger, ForeignKey("rail.rail_id"), nullable=True)
-    rail = relationship("Rail", back_populates="sensor2_records")
