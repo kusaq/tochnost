@@ -5,6 +5,13 @@ from pydantic import BaseModel, Field, field_validator, AliasChoices
 
 
 @dataclass(slots=True)
+class Screw:
+    screw_id: int
+    timestamp: datetime
+    frequency_torque: int
+
+
+@dataclass(slots=True)
 class RailSession:
     rail_id: int
     start_time: datetime
@@ -109,41 +116,24 @@ class Sensor1Create(BaseModel):
 
 
 class Sensor2Values(BaseModel):
-    resistance_1: float = Field(description="Сопротивление 1")
-    resistance_2: float = Field(description="Сопротивление 2 (<=4)")
+    resistance: float = Field(description="Сопротивление", validation_alias=AliasChoices("R", "resistance"))
+    temperature: float = Field(description="Температура", validation_alias=AliasChoices("T", "temperature"))
+    humidity: float = Field(description="Влажность %", validation_alias=AliasChoices("H", "humidity"))
 
-    moment_pc: int = Field(
-        description="Момент ПЧ",
-        validation_alias=AliasChoices("moment_PC", "moment_pc"),
-    )
-    moment_percent: int = Field(
-        description="Момент %",
-        validation_alias=AliasChoices("momentPercent", "moment_percent"),
-    )
-    moment_amperage_percent: int = Field(
-        description="Момент (т) %",
-        validation_alias=AliasChoices("momentAmperagePercent", "moment_amperage_percent"),
-    )
-    turnover: int = Field(
-        description="Обороты ПЧ",
-        validation_alias=AliasChoices("turnover", "rpm", "revolutions"),
-    )
-    amperage: int = Field(
-        description="Ток ПЧ",
-        validation_alias=AliasChoices("amperage", "current"),
-    )
-    phase_amperage: int = Field(
-        description="Фазный ток",
-        validation_alias=AliasChoices("phaseAmperage", "phase_amperage"),
-    )
-    revolutions_pc_alt: int = Field(
-        description="Обороты ПЧ alt",
-        validation_alias=AliasChoices("revolutions_PC_alt", "revolutions_pc_alt"),
-    )
-    status_pc: int = Field(
-        description="Статус ПЧ",
-        validation_alias=AliasChoices("status_PC", "status_pc"),
-    )
+    frequency_status_1: int = Field(description="Состояние ПЧ 1", validation_alias=AliasChoices("ST1", "frequency_status_1"))
+    frequency_status_2: int = Field(description="Состояние ПЧ 2", validation_alias=AliasChoices("ST2", "frequency_status_2"))
+    frequency_status_3: int = Field(description="Состояние ПЧ 3", validation_alias=AliasChoices("ST3", "frequency_status_3"))
+    frequency_status_4: int = Field(description="Состояние ПЧ 4", validation_alias=AliasChoices("ST4", "frequency_status_4"))
+
+    frequency_torque_1: int = Field(description="Момент ПЧ 1", validation_alias=AliasChoices("M1", "frequency_torque_1"))
+    frequency_torque_2: int = Field(description="Момент ПЧ 2", validation_alias=AliasChoices("M2", "frequency_torque_2"))
+    frequency_torque_3: int = Field(description="Момент ПЧ 3", validation_alias=AliasChoices("M3", "frequency_torque_3"))
+    frequency_torque_4: int = Field(description="Момент ПЧ 4", validation_alias=AliasChoices("M4", "frequency_torque_4"))
+
+    converter_frequency_1: int = Field(description="Частота ПЧ 1", validation_alias=AliasChoices("f1", "converter_frequency_1"))
+    converter_frequency_2: int = Field(description="Частота ПЧ 2", validation_alias=AliasChoices("f2", "converter_frequency_2"))
+    converter_frequency_3: int = Field(description="Частота ПЧ 3", validation_alias=AliasChoices("f3", "converter_frequency_3"))
+    converter_frequency_4: int = Field(description="Частота ПЧ 4", validation_alias=AliasChoices("f4", "converter_frequency_4"))
 
 
 class Sensor2Create(BaseModel):
