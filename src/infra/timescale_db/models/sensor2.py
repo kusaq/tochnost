@@ -11,7 +11,12 @@ class Sensor2(Base, CreateTimestampMixin):
     __tablename__ = "sensor_2"
 
     sensor2_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    screw_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("screw.screw_id"), nullable=False, comment="идентификатор гайки")
+    screw_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("screw.screw_id", onupdate="CASCADE", ondelete="CASCADE",),
+        nullable=False,
+        comment="идентификатор гайки",
+    )
 
 
     resistance: Mapped[float] = mapped_column(Float, nullable=False, comment="Сопротивление")

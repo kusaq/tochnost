@@ -206,7 +206,8 @@ def main():
 
         # Closing idle ticks (zeros) to ensure active rails get closed
         for _ in range(args.closing_ticks):
-            s1_payload = gen_sensor1_payload(now, mm)
+            # To trigger rail close on backend, mmAlongRail must be zero during idle
+            s1_payload = gen_sensor1_payload(now, 0)
             r1 = send_sensor1(args.base_url, s1_payload)
             if r1.status_code >= 300:
                 print(r1.text, file=sys.stderr)

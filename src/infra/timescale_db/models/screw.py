@@ -24,4 +24,9 @@ class Screw(Base, CreateTimestampMixin):
         nullable=False,
         default=ScrewStatus.IN_PROGRESS,
     )
-    rail_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("rail.rail_id"), nullable=False, comment="идентификатор рельса")
+    rail_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("rail.rail_id", onupdate="CASCADE", ondelete="CASCADE"),
+        nullable=False,
+        comment="идентификатор рельса",
+    )
