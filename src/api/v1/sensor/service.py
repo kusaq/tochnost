@@ -44,7 +44,8 @@ class SensorService(BaseService):
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
         if self._active is None:
             if self._screw_session is not None:
-                await self.uow.rail.update_fields(rail_id=self._closed[-1].rail_id, sleepers=self._total_screws // 2)
+                if len(self._closed) > 0:
+                    await self.uow.rail.update_fields(rail_id=self._closed[-1].rail_id, sleepers=self._total_screws//2)
                 self._total_screws = 0
                 self._screw_session = None
             return
