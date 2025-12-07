@@ -1,4 +1,4 @@
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from uuid import UUID
 
 import jwt
@@ -49,7 +49,7 @@ class AuthService(BaseService):
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         exp_timestamp = payload.get("exp")
         if exp_timestamp:
-            ttl = int((datetime.fromtimestamp(exp_timestamp) - datetime.now()).total_seconds())
+            ttl = int((datetime.fromtimestamp(exp_timestamp, tz=timezone.utc) - datetime.now(timezone.utc)).total_seconds())
             if ttl > 0:
                 await self.redis.set(cache_key, user.model_dump_json(), expire=ttl)
         return user
@@ -60,8 +60,8 @@ class AuthService(BaseService):
         exp_timestamp = payload["exp"]
 
         # Вычисляем время жизни токена
-        exp_datetime = datetime.fromtimestamp(exp_timestamp)
-        ttl = int((exp_datetime - datetime.now()).total_seconds())
+        exp_datetime = datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
+        ttl = int((exp_datetime - datetime.now(timezone.utc)).total_seconds())
 
         if ttl > 0:
             await self.redis.set(
@@ -105,6 +105,6 @@ class AuthService(BaseService):
         to_encode = {
             "sub": str(user_id),
             "username": username,
-            "exp": datetime.now() + timedelta(seconds=exp_time_sec)
+            "exp": datetime.now(timezone.utc) + timedelta(seconds=exp_time_sec)
         }
         return jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
