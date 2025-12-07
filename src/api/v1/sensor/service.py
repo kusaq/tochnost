@@ -1,13 +1,12 @@
 from collections import deque
 from datetime import datetime
+import math
 from typing import Deque
 
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
-from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw
-from infra.timescale_db.models.rail import RailStatus
-from infra.timescale_db.models.screw import ScrewStatus
+from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus
 
 
 class SensorService(BaseService):
@@ -45,7 +44,7 @@ class SensorService(BaseService):
                 if len(SensorService._closed) > 0:
                     await self.uow.rail.update_fields(
                         rail_id=SensorService._closed[-1].rail_id,
-                        sleepers=SensorService._total_screws // 2
+                        sleepers=math.ceil(SensorService._total_screws / 4)
                     )
                 SensorService._total_screws = 0
                 SensorService._screw_session = None
@@ -56,18 +55,20 @@ class SensorService(BaseService):
             SensorService._screw_session = deque()
 
         if all([
-            sensor2_data.values.frequency_torque_1==0,
-            sensor2_data.values.frequency_torque_2==0,
-            sensor2_data.values.frequency_torque_3==0,
-            sensor2_data.values.frequency_torque_4==0,
+            sensor2_data.values.frequency_status_1==0,
+            sensor2_data.values.frequency_status_2==0,
+            sensor2_data.values.frequency_status_3==0,
+            sensor2_data.values.frequency_status_4==0,
         ]):
             if len(SensorService._screw_session) > 0:
                 threshold = await self.get_threshold_data()
 
-                for num, screw in enumerate(SensorService._screw_session):
+                for screw in SensorService._screw_session:
                     status = ScrewStatus.COMPLETED
-                    if threshold.thresholds["frequency_torque"].min_value < screw.frequency_torque < threshold.thresholds["frequency_torque"].max_value:
-                        status = ScrewStatus.COMPLETED_WITH_ERROR
+                    if threshold.thresholds.get("frequency_torque"):
+                        if (threshold.thresholds["frequency_torque"].min_value <
+                                screw.frequency_torque < threshold.thresholds["frequency_torque"].max_value):
+                            status = ScrewStatus.COMPLETED_WITH_ERROR
                     await self.uow.screw.update(
                         screw_id=screw.screw_id,
                         status=status
@@ -84,6 +85,10 @@ class SensorService(BaseService):
                 )
             else:
                 screw_id = SensorService._screw_session[i-1].screw_id
+                SensorService._screw_session[i-1].frequency_torque = max(
+                    getattr(sensor2_data.values, f"frequency_torque_{i}"),
+                    SensorService._screw_session[i-1].frequency_torque
+                )
             sensors.append(
                 Sensor2(timestamp=sensor2_data.timestamp, screw_id=screw_id, **sensor2_data.values.model_dump())
             )
