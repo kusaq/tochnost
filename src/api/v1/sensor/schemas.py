@@ -135,6 +135,14 @@ class Sensor2Values(BaseModel):
     converter_frequency_3: int = Field(description="Частота ПЧ 3", validation_alias=AliasChoices("f3", "converter_frequency_3"))
     converter_frequency_4: int = Field(description="Частота ПЧ 4", validation_alias=AliasChoices("f4", "converter_frequency_4"))
 
+    def all_frequency_status_zero(self) -> bool:
+        return (
+            self.frequency_status_1 == 0
+            and self.frequency_status_2 == 0
+            and self.frequency_status_3 == 0
+            and self.frequency_status_4 == 0
+        )
+
 
 class Sensor2Create(BaseModel):
     timestamp: datetime = Field(description="метка времени измерения")

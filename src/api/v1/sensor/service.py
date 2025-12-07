@@ -1,22 +1,15 @@
-from collections import deque
 from datetime import datetime
 import math
-from typing import Deque
 
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus
+from api.v1.sensor.state import SensorState
 
 
 class SensorService(BaseService):
-    _active: RailSession | None = None
-
-    _closed_keep_limit = 10
-    _closed: Deque[RailSession] = deque(maxlen=_closed_keep_limit)
-
-    _total_screws: int = 0
-    _screw_session: Deque[ScrewDC] | None = None
+    state: SensorState
 
     THRESHOLDS_CACHE_KEY = "thresholds:all"
 
@@ -39,67 +32,44 @@ class SensorService(BaseService):
         return thresholds_model
 
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
-        if SensorService._active is None:
-            if SensorService._screw_session is not None:
-                if len(SensorService._closed) > 0:
-                    await self.uow.rail.update_fields(
-                        rail_id=SensorService._closed[-1].rail_id,
-                        sleepers=math.ceil(SensorService._total_screws / 4)
-                    )
-                SensorService._total_screws = 0
-                SensorService._screw_session = None
+        if not self.state.has_active_rail():
             return
-
-        if SensorService._screw_session is None:
-            SensorService._total_screws = 0
-            SensorService._screw_session = deque()
-
-        if all([
-            sensor2_data.values.frequency_status_1==0,
-            sensor2_data.values.frequency_status_2==0,
-            sensor2_data.values.frequency_status_3==0,
-            sensor2_data.values.frequency_status_4==0,
-        ]):
-            if len(SensorService._screw_session) > 0:
+        
+        if sensor2_data.values.all_frequency_status_zero():
+            if self.state.has_screw_session:
                 threshold = await self.get_threshold_data()
 
-                for screw in SensorService._screw_session:
+                for screw in list(self.state.iter_screws()):
                     status = ScrewStatus.COMPLETED
                     ft_threshold = threshold.thresholds.get("frequency_torque")
                     if ft_threshold:
                         ft_value = screw.frequency_torque
                         if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
                             status = ScrewStatus.COMPLETED_WITH_ERROR
-                    await self.uow.screw.update(
-                        screw_id=screw.screw_id,
-                        status=status
-                    )
-                SensorService._screw_session = deque()
+                    await self.uow.screw.update(screw_id=screw.screw_id, status=status)
+                self.state.clear_screw_session()
             return
 
         sensors = []
         for i in range(1, 5):
-            if len(SensorService._screw_session) < i:
+            if self.state.screw_session_len < i:
                 screw_id = await self.add_screw(
                     getattr(sensor2_data.values, f"frequency_torque_{i}"),
                     sensor2_data.timestamp,
                 )
             else:
-                screw_id = SensorService._screw_session[i-1].screw_id
-                SensorService._screw_session[i-1].frequency_torque = max(
-                    getattr(sensor2_data.values, f"frequency_torque_{i}"),
-                    SensorService._screw_session[i-1].frequency_torque
-                )
+                screw_id = self.state.screw_session_item(i-1).screw_id
+                self.state.update_screw_max_torque(i-1, getattr(sensor2_data.values, f"frequency_torque_{i}"))
             sensors.append(
                 Sensor2(timestamp=sensor2_data.timestamp, screw_id=screw_id, **sensor2_data.values.model_dump())
             )
         await self.uow.sensor2.add_many(sensors)
 
     async def add_screw(self, frequency_torque: int, ts: datetime) -> int:
-        serial_number = SensorService._total_screws + 1
-        SensorService._total_screws += 1
-        screw = await self.uow.screw.add(Screw(rail_id=SensorService._active.rail_id, serial_id=serial_number))
-        SensorService._screw_session.append(
+        serial_number = self.state.next_serial()
+        active = self.state.get_active_rail()
+        screw = await self.uow.screw.add(Screw(rail_id=active.rail_id, serial_id=serial_number))
+        self.state.append_screw(
             ScrewDC(
                 screw_id=screw.screw_id,
                 timestamp=ts,
@@ -109,23 +79,23 @@ class SensorService(BaseService):
         return screw.screw_id
 
     async def add_sensor1_data(self, data: Sensor1Create) -> None:
-        rail_id = self.is_in_closed(data.timestamp)
+        rail_id = self.state.is_in_closed(data.timestamp)
         if rail_id is not None:
             await self.uow.sensor1.add(
                 Sensor1(rail_id=rail_id, timestamp=data.timestamp, **data.values.model_dump())
             )
             return
 
-        if SensorService._active:
-            if data.timestamp < SensorService._active.start_time:
+        active = self.state.get_active_rail()
+        if active:
+            if data.timestamp < active.start_time:
                 return
 
-            if data.values.mm_along_rail >= SensorService._active.last_mm_along_rail:
-                SensorService._active.last_mm_along_rail = data.values.mm_along_rail
-                SensorService._active.last_timestamp = data.timestamp
+            if data.values.mm_along_rail >= active.last_mm_along_rail:
+                self.state.update_active_progress(data.values.mm_along_rail, data.timestamp)
                 await self.uow.sensor1.add(
                     Sensor1(
-                        rail_id=SensorService._active.rail_id,
+                        rail_id=active.rail_id,
                         timestamp=data.timestamp,
                         **data.values.model_dump(),
                     )
@@ -139,39 +109,28 @@ class SensorService(BaseService):
         return
 
     async def close_active_rail(self) -> None:
+        active = self.state.get_active_rail()
         completed_rail = await self.uow.rail.update_fields(
+            rail_id=active.rail_id,
             status=RailStatus.COMPLETED,
-            rail_id=SensorService._active.rail_id,
-            end_time=SensorService._active.last_timestamp
+            end_time=active.last_timestamp,
+            sleepers=math.ceil(self.state.get_total_screws() / 4),
         )
-        SensorService._active.end_time = completed_rail.end_time
-        SensorService._closed.append(SensorService._active)
-        SensorService._active = None
+        active.end_time = completed_rail.end_time
+        self.state.append_closed(active)
+        self.state.clear_active()
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
+        self.state.reset_total_screws()
+        self.state.clear_screw_session()
         rail = await self.uow.rail.add(Rail(start_time=data.timestamp))
-        SensorService._active = RailSession(
+        self.state.set_active(RailSession(
             rail_id=rail.rail_id,
             start_time=data.timestamp,
             end_time=None,
             last_mm_along_rail=data.values.mm_along_rail,
             last_timestamp=data.timestamp,
-        )
+        ))
         await self.uow.sensor1.add(
             Sensor1(rail_id=rail.rail_id, timestamp=data.timestamp, **data.values.model_dump())
         )
-
-    @classmethod
-    def is_in_closed(cls, ts: datetime) -> int | None:
-        """
-        Проверяет, входит ли ts в какой-то из интервалов.
-        """
-        for session in reversed(cls._closed):
-            if ts < session.start_time:
-                continue
-            end_ts = session.end_time or session.last_timestamp or session.start_time
-            if ts <= end_ts:
-                return session.rail_id
-            if ts > end_ts:
-                break
-        return None
