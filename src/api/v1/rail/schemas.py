@@ -8,10 +8,9 @@ class RailRead(BaseModel):
     status: str
     object_name: str | None = None
     fastening_type: str | None = None
-    sleepers: str | None = None
+    sleepers: int | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
-    errors_count: int = 0
     created_at: datetime | None = None
 
     model_config = dict(from_attributes=True)
@@ -22,10 +21,9 @@ class RailUpdate(BaseModel):
     status: str | None = None
     object_name: str | None = None
     fastening_type: str | None = None
-    sleepers: str | None = None
+    sleepers: int | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
-    errors_count: int | None = None
 
 
 class RailsListResponse(BaseModel):
