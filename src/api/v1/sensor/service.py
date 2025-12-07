@@ -169,8 +169,9 @@ class SensorService(BaseService):
         for session in reversed(cls._closed):
             if ts < session.start_time:
                 continue
-            if ts <= session.end_time:
+            end_ts = session.end_time or session.last_timestamp or session.start_time
+            if ts <= end_ts:
                 return session.rail_id
-            if ts > session.end_time:
+            if ts > end_ts:
                 break
         return None
