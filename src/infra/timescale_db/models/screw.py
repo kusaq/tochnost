@@ -10,7 +10,6 @@ from infra.timescale_db.models.base import Base
 class ScrewStatus(PyEnum):
     IN_PROGRESS = "В процессе"
     COMPLETED = "Завершено"
-    COMPLETED_WITH_ERROR = "Завершено с ошибкой"
 
 
 class Screw(Base, CreateTimestampMixin):

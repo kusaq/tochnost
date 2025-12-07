@@ -45,7 +45,8 @@ class SensorService(BaseService):
                     if ft_threshold:
                         ft_value = screw.frequency_torque
                         if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
-                            status = ScrewStatus.COMPLETED_WITH_ERROR
+                            # TODO Занести в таблицу с ошибками
+                            ...
                     await self.uow.screw.update(screw_id=screw.screw_id, status=status)
                 self.state.clear_screw_session()
             return
