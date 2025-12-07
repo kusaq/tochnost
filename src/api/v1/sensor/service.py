@@ -68,7 +68,6 @@ class SensorService(BaseService):
                     ft_threshold = threshold.thresholds.get("frequency_torque")
                     if ft_threshold:
                         ft_value = screw.frequency_torque
-                        # Mark error when OUTSIDE acceptable range (inclusive bounds considered acceptable)
                         if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
                             status = ScrewStatus.COMPLETED_WITH_ERROR
                     await self.uow.screw.update(
