@@ -25,3 +25,8 @@ class ErrorStorage(PostgresStorage[Error]):
         )
         res = await self._db.execute(stmt)
         return res.scalar_one_or_none()
+
+    async def list_by_screw(self, screw_id: int) -> Sequence[Error]:
+        stmt = select(Error).where(Error.screw_id == screw_id).order_by(Error.error_id.desc())
+        res = await self._db.execute(stmt)
+        return res.scalars().all()
