@@ -16,6 +16,8 @@ class SensorState:
         self._closed: Deque[RailSession] = deque(maxlen=closed_keep_limit)
         self._total_screws: int = 0
         self._screw_session: Deque[ScrewDC] = deque()
+        # generic bad ranges by metric key: key -> (start_mm, start_value)
+        self._bad_ranges: dict[str, tuple[int, float]] = {}
 
     # ---- Active rail helpers ----
     def has_active_rail(self) -> bool:
@@ -59,6 +61,26 @@ class SensorState:
 
     def iter_screws(self):
         return iter(self._screw_session)
+
+    # ---- Generic bad range helpers ----
+    def is_bad_range_active(self, key: str) -> bool:
+        return key in self._bad_ranges
+
+    def open_bad_range(self, key: str, start_mm: int, start_value: float) -> None:
+        if key not in self._bad_ranges:
+            self._bad_ranges[key] = (start_mm, start_value)
+
+    def close_bad_range(self, key: str) -> tuple[int, float] | None:
+        opened = self._bad_ranges.pop(key, None)
+        if opened is None:
+            return None
+        start_mm, start_value = opened
+        return int(start_mm), float(start_value)
+
+    def pop_all_bad_ranges(self) -> list[tuple[str, int, float]]:
+        items = [(k, int(v[0]), float(v[1])) for k, v in self._bad_ranges.items()]
+        self._bad_ranges.clear()
+        return items
 
     # ---- Total screws helpers ----
     def reset_total_screws(self) -> None:
