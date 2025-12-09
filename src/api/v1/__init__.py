@@ -3,6 +3,7 @@ from api.v1.sensor.router import router as sensor_router
 from api.v1.rail.router import router as rail_router
 from api.v1.error.router import router as error_router
 from api.v1.screw.router import router as screw_router
+from api.v1.threshold.router import router as threshold_router
 
 __all__ = [
     "auth_router",
@@ -10,4 +11,5 @@ __all__ = [
     "rail_router",
     "error_router",
     "screw_router",
+    "threshold_router",
 ]
