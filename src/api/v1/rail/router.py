@@ -11,7 +11,12 @@ from api.v1.auth.dependencies import CurrentUserDep
 router = APIRouter(prefix="/rail", tags=["Rail"])
 
 
-@router.get("", response_model=RailsListResponse)
+@router.get(
+    "",
+    response_model=RailsListResponse,
+    summary="Список рельс",
+    description="Возвращает список рельс с фильтрами, пагинацией и сортировкой.",
+)
 async def list_rails(
     service: RailServiceDep,
     pagination: PaginationDep,
@@ -35,7 +40,12 @@ async def list_rails(
     )
 
 
-@router.patch("/{rail_id}", response_model=RailRead | None)
+@router.patch(
+    "/{rail_id}",
+    response_model=RailRead | None,
+    summary="Частичное обновление рельсы",
+    description="Обновляет поля рельсы по идентификатору.",
+)
 async def update_rail(
     rail_id: int,
     payload: RailUpdate,
@@ -45,7 +55,15 @@ async def update_rail(
     return await service.update_rail(rail_id, payload)
 
 
-@router.delete("", response_model=dict)
+@router.delete(
+    "",
+    response_model=dict,
+    summary="Массовое удаление рельс",
+    description="Удаляет рельсы по списку идентификаторов. Возвращает количество удалённых записей.",
+    responses={
+        404: {"description": "Рельсы не найдены"},
+    },
+)
 async def delete_rails(
     rail_ids: list[int],
     service: RailServiceDep,
@@ -55,7 +73,15 @@ async def delete_rails(
     return {"deleted": deleted}
 
 
-@router.delete("/{rail_id}", response_model=dict)
+@router.delete(
+    "/{rail_id}",
+    response_model=dict,
+    summary="Удаление рельсы",
+    description="Удаляет рельсу по идентификатору. Возвращает { deleted: 1 } при успехе.",
+    responses={
+        404: {"description": "Рельса не найдена"},
+    },
+)
 async def delete_rail(
     rail_id: int,
     service: RailServiceDep,
