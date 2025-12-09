@@ -4,8 +4,8 @@ import math
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
-from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus
 from api.v1.sensor.state import SensorState
+from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error
 
 
 class SensorService(BaseService):
@@ -24,6 +24,7 @@ class SensorService(BaseService):
                 min_value=t.min_value,
                 max_value=t.max_value,
                 is_critical=t.is_critical,
+                unit_of_measurement=t.unit_of_measurement,
             )
             for t in items
         }
@@ -39,15 +40,32 @@ class SensorService(BaseService):
             if self.state.has_screw_session:
                 threshold = await self.get_threshold_data()
 
-                for screw in list(self.state.iter_screws()):
-                    status = ScrewStatus.COMPLETED
+                active = self.state.get_active_rail()
+                errors_to_add: list[Error] = []
+                for idx, screw in enumerate(list(self.state.iter_screws()), start=1):
                     ft_threshold = threshold.thresholds.get("frequency_torque")
                     if ft_threshold:
                         ft_value = screw.frequency_torque
                         if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
-                            # TODO Занести в таблицу с ошибками
-                            ...
-                    await self.uow.screw.update(screw_id=screw.screw_id, status=status)
+                            side = "левой" if idx in (1, 2) else "правой"
+                            verdict = "недостаточно" if ft_value < ft_threshold.min_value else "излишне"
+                            description = f"Гайка №{screw.serial_id} по {side} стороне была {verdict} закручена"
+                            errors_to_add.append(
+                                Error(
+                                    rail_id=active.rail_id,
+                                    screw_id=screw.screw_id,
+                                    value_name="frequency_torque",
+                                    description=description,
+                                    unit_of_measurement=ft_threshold.unit_of_measurement,
+                                    value=ft_value,
+                                    min_value=ft_threshold.min_value,
+                                    max_value=ft_threshold.max_value,
+                                    is_critical=ft_threshold.is_critical,
+                                )
+                            )
+                    await self.uow.screw.update(screw_id=screw.screw_id, status=ScrewStatus.COMPLETED)
+                if errors_to_add:
+                    await self.uow.error.add_many(errors_to_add)
                 self.state.clear_screw_session()
             return
 
@@ -73,6 +91,7 @@ class SensorService(BaseService):
         self.state.append_screw(
             ScrewDC(
                 screw_id=screw.screw_id,
+                serial_id=serial_number,
                 timestamp=ts,
                 frequency_torque=frequency_torque,
             )

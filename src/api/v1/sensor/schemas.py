@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, AliasChoices
 @dataclass(slots=True)
 class Screw:
     screw_id: int
+    serial_id: int
     timestamp: datetime
     frequency_torque: int
 
@@ -167,6 +168,7 @@ class ThresholdEntry(BaseModel):
     min_value: float
     max_value: float
     is_critical: bool
+    unit_of_measurement: str | None = Field(default=None)
 
 
 class Thresholds(BaseModel):
