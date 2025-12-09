@@ -4,6 +4,7 @@ from infra.timescale_db.models.sensor1 import Sensor1
 from infra.timescale_db.models.sensor2 import Sensor2
 from infra.timescale_db.models.threshold import Threshold
 from infra.timescale_db.models.screw import Screw, ScrewStatus
+from infra.timescale_db.models.error import Error
 
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "Screw",
     "RailStatus",
     "ScrewStatus",
+    "Error",
 ]
