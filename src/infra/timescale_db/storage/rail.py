@@ -2,8 +2,9 @@ from typing import Sequence
 
 from sqlalchemy import select, func, update, delete
 
-from infra.timescale_db.models import Rail
+from infra.timescale_db.models import Rail, RailStatus
 from infra.timescale_db.storage.base_storage import PostgresStorage
+from datetime import datetime, timezone
 
 
 class RailStorage(PostgresStorage[Rail]):
@@ -77,3 +78,24 @@ class RailStorage(PostgresStorage[Rail]):
         res = await self._db.execute(stmt)
         deleted = res.scalars().all()
         return list(deleted)
+
+    async def count_completed_since(self, since: datetime) -> int:
+        """
+        Кол-во завершённых рельс с конца since (по end_time).
+        """
+        # Приводим к наивному UTC, так как колонка end_time = TIMESTAMP WITHOUT TIME ZONE
+        since_param = since
+        if since.tzinfo is not None:
+            try:
+                since_param = since.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                since_param = since.replace(tzinfo=None)
+        stmt = (
+            select(func.count())
+            .select_from(Rail)
+            .where(Rail.status == RailStatus.COMPLETED)
+            .where(Rail.end_time.is_not(None))
+            .where(Rail.end_time >= since_param)
+        )
+        res = await self._db.execute(stmt)
+        return int(res.scalar_one() or 0)

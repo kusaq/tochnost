@@ -18,7 +18,7 @@ class RedisAPI:
     async def close(self):
         await self._client.aclose()
 
-    async def set(self, key: str, value: str, expire: int | None = 0):
+    async def set(self, key: str, value: bytes | bytearray | memoryview | str | int | float, expire: int | None = 0):
         await self._client.set(name=key, value=value, ex=expire or None)
 
     async def get(self, key: str) -> str | None:

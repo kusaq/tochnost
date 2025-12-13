@@ -18,6 +18,10 @@ class SensorState:
         self._screw_session: Deque[ScrewDC] = deque()
         # generic bad ranges by metric key: key -> (start_mm, start_value)
         self._bad_ranges: dict[str, tuple[int, float]] = {}
+        # resistance stats
+        self._res_sum: float = 0.0
+        self._res_count: int = 0
+        self._res_current: float = 0.0
 
     # ---- Active rail helpers ----
     def has_active_rail(self) -> bool:
@@ -92,6 +96,38 @@ class SensorState:
 
     def get_total_screws(self) -> int:
         return self._total_screws
+
+    # ---- Resistance stats helpers ----
+    def update_resistance(self, value: float) -> None:
+        self._res_current = float(value)
+        self._res_sum += float(value)
+        self._res_count += 1
+
+    def get_resistance_current(self) -> float:
+        return float(self._res_current)
+
+    def get_resistance_average(self) -> float:
+        if self._res_count == 0:
+            return 0.0
+        return float(self._res_sum / self._res_count)
+
+    def reset_resistance_stats(self) -> None:
+        self._res_sum = 0.0
+        self._res_count = 0
+        self._res_current = 0.0
+
+    # ---- Sides counts (for active rail) ----
+    def get_left_right_counts(self) -> tuple[int, int]:
+        """
+        Возвращает (left_count, right_count) исходя из общего количества гаек:
+        В каждом батче из 4: 1 и 2 — левый, 3 и 4 — правый.
+        """
+        total = self._total_screws
+        full_batches = total // 4
+        rem = total % 4
+        left = full_batches * 2 + min(2, rem)
+        right = total - left
+        return left, right
 
     # ---- Closed rails helpers ----
     def closed_len(self) -> int:

@@ -22,7 +22,7 @@ connect_args = {
 
 engine: AsyncEngine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=False,
     echo_pool=False,
     connect_args=connect_args,
     poolclass=AsyncAdaptedQueuePool,
@@ -42,6 +42,18 @@ session: async_scoped_session[AsyncSession] = async_scoped_session(
 @asynccontextmanager
 async def get_db() -> AsyncIterator[AsyncSession]:
     async with session() as db:
+        try:
+            yield db
+            await db.commit()
+        except Exception as error:
+            await db.rollback()
+            raise error
+        finally:
+            await db.close()
+
+@asynccontextmanager
+async def get_unscoped_db() -> AsyncIterator[AsyncSession]:
+    async with async_session_factory() as db:
         try:
             yield db
             await db.commit()

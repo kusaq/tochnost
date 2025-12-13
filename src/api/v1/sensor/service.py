@@ -104,6 +104,9 @@ class SensorService(BaseService):
         return thresholds_model
 
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
+        await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
+        await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
+
         if not self.state.has_active_rail():
             return
         active = self.state.get_active_rail()

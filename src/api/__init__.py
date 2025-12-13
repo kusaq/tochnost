@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from api.metrics import router as metrics_router
-from api.v1 import auth_router, sensor_router, rail_router, error_router, screw_router, threshold_router
+from api.v1 import auth_router, sensor_router, rail_router, error_router, screw_router, threshold_router, ws_router
 
 
 v1_router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -11,6 +11,7 @@ v1_router.include_router(rail_router)
 v1_router.include_router(error_router)
 v1_router.include_router(screw_router)
 v1_router.include_router(threshold_router)
+v1_router.include_router(ws_router)
 
 __all__ = [
     "v1_router",

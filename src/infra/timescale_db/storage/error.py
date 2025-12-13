@@ -4,6 +4,7 @@ from sqlalchemy import select, update
 
 from infra.timescale_db.models import Error
 from infra.timescale_db.storage.base_storage import PostgresStorage
+from sqlalchemy import func
 
 
 class ErrorStorage(PostgresStorage[Error]):
@@ -30,3 +31,7 @@ class ErrorStorage(PostgresStorage[Error]):
         stmt = select(Error).where(Error.screw_id == screw_id).order_by(Error.error_id.desc())
         res = await self._db.execute(stmt)
         return res.scalars().all()
+
+    async def count_all(self) -> int:
+        res = await self._db.execute(select(func.count()).select_from(Error))
+        return int(res.scalar_one() or 0)
