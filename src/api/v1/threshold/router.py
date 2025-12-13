@@ -5,7 +5,7 @@ from api.v1.threshold.dependencies import ThresholdServiceDep
 from api.v1.threshold.schemas import ThresholdRead
 
 
-router = APIRouter(prefix="/treshold", tags=["Threshold"])
+router = APIRouter(prefix="/threshold", tags=["Threshold"])
 
 
 @router.get(
