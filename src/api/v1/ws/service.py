@@ -80,7 +80,6 @@ async def run_push_status(ws: WebSocket) -> None:
             if not active:
                 message["data"] = {}
                 await ws.send_text(json.dumps(message, ensure_ascii=False))
-                await asyncio.sleep(2)
                 continue
 
             async with get_unscoped_db() as db:
@@ -103,3 +102,32 @@ async def run_push_status(ws: WebSocket) -> None:
             pass
         finally:
             await asyncio.sleep(2)
+
+
+async def send_errors_today_distribution(ws: WebSocket) -> None:
+    """
+    Отправляет одноразово распределение ошибок за сегодня по часам.
+    """
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with get_unscoped_db() as db:
+        uow = TimeScaleDBUnitOfWork(db)
+        grouped = await uow.error.count_grouped_by_hour_since(today_start)
+    buckets = [
+        {
+            "hour": (dt.replace(tzinfo=timezone.utc).isoformat() if isinstance(dt, datetime) else str(dt)),
+            "count": cnt,
+        }
+        for dt, cnt in grouped
+    ]
+    total = sum(b["count"] for b in buckets)
+    message = {
+        "channel": "dashboard:errors_distribution",
+        "data": {
+            "from": today_start.isoformat(),
+            "to": now.isoformat(),
+            "buckets": buckets,
+            "total": total,
+        },
+    }
+    await ws.send_text(json.dumps(message, ensure_ascii=False))

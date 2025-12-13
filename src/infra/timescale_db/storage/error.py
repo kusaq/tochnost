@@ -1,10 +1,10 @@
 from typing import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 
 from infra.timescale_db.models import Error
 from infra.timescale_db.storage.base_storage import PostgresStorage
-from sqlalchemy import func
+from datetime import datetime, timezone
 
 
 class ErrorStorage(PostgresStorage[Error]):
@@ -35,3 +35,26 @@ class ErrorStorage(PostgresStorage[Error]):
     async def count_all(self) -> int:
         res = await self._db.execute(select(func.count()).select_from(Error))
         return int(res.scalar_one() or 0)
+
+    async def count_grouped_by_hour_since(self, since: datetime) -> list[tuple[datetime, int]]:
+        """
+        Возвращает список (час, количество) для ошибок, созданных с момента 'since' включительно.
+        Час усечён до начала часа (date_trunc('hour', created_at)).
+        """
+        # TIMESTAMP WITHOUT TIME ZONE: приводим к наивному UTC
+        since_param = since
+        if since.tzinfo is not None:
+            try:
+                since_param = since.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                since_param = since.replace(tzinfo=None)
+        bucket = func.date_trunc("hour", Error.created_at).label("hour_bucket")
+        stmt = (
+            select(bucket, func.count().label("cnt"))
+            .where(Error.created_at >= since_param)
+            .group_by(bucket)
+            .order_by(bucket.asc())
+        )
+        res = await self._db.execute(stmt)
+        rows = res.all()
+        return [(row.hour_bucket, int(row.cnt)) for row in rows]

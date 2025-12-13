@@ -5,7 +5,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from api.v1.sensor.state import SensorStateDep
 from infra.redis.dependencies import RedisDep
-from api.v1.ws.service import run_sender, run_push_stats, run_push_status
+from api.v1.ws.service import run_sender, run_push_stats, run_push_status, send_errors_today_distribution
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -31,6 +31,7 @@ async def dashboard_ws(
     - dashboard:stages     — блок этапов текущей рельсы (гайки слева/справа, сопротивление текущее/среднее)
     """
     await websocket.accept()
+    await send_errors_today_distribution(websocket)
     default_channels = ["dashboard:errors", "dashboard:stages"]
     subs = list(channels) if channels else default_channels
 

@@ -1,5 +1,6 @@
 from datetime import datetime
 import math
+import json
 
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
@@ -83,6 +84,18 @@ class SensorService(BaseService):
                         is_critical=res_threshold.is_critical,
                     )
                 )
+                await self.redis.publish(
+                    "dashboard:errors",
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now().isoformat(),
+                            "description": f"{self.METRIC_DISPLAY.get(metric_key, metric_key)} было неприемлемым с {start_mm} мм по {current_mm} мм",
+                            "value_name": metric_key,
+                            "value": start_value,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
 
     async def get_threshold_data(self) -> Thresholds:
         cached = await self.redis.get(self.THRESHOLDS_CACHE_KEY)
@@ -151,6 +164,19 @@ class SensorService(BaseService):
                     completed_batch.append(screw)
                 if errors_to_add:
                     await self.uow.error.add_many(errors_to_add)
+                    for err in errors_to_add:
+                        await self.redis.publish(
+                            "dashboard:errors",
+                            json.dumps(
+                                {
+                                    "timestamp": sensor2_data.timestamp.isoformat(),
+                                    "description": err.description,
+                                    "value_name": err.value_name,
+                                    "value": err.value,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
                 self.state.clear_screw_session()
             return
 
@@ -247,6 +273,18 @@ class SensorService(BaseService):
                     max_value=th.max_value,
                     is_critical=th.is_critical,
                 )
+            )
+            await self.redis.publish(
+                "dashboard:errors",
+                json.dumps(
+                    {
+                        "timestamp": (active.last_timestamp.isoformat() if active.last_timestamp else datetime.now().isoformat()),
+                        "description": f"{self.METRIC_DISPLAY.get(key, key)} было неприемлемым с {start_mm} мм по {end_mm} мм",
+                        "value_name": key,
+                        "value": start_value,
+                    },
+                    ensure_ascii=False,
+                ),
             )
         completed_rail = await self.uow.rail.update_fields(
             rail_id=active.rail_id,
