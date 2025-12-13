@@ -58,3 +58,13 @@ class ErrorStorage(PostgresStorage[Error]):
         res = await self._db.execute(stmt)
         rows = res.all()
         return [(row.hour_bucket, int(row.cnt)) for row in rows]
+
+    async def count_by_rail(self, rail_id: int, is_fixed: bool | None = None) -> int:
+        """
+        Количество ошибок по конкретной рельсе.
+        """
+        stmt = select(func.count()).select_from(Error).where(Error.rail_id == rail_id)
+        if is_fixed is not None:
+            stmt = stmt.where(Error.is_fixed == is_fixed)
+        res = await self._db.execute(stmt)
+        return int(res.scalar_one() or 0)

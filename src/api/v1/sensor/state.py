@@ -22,6 +22,9 @@ class SensorState:
         self._res_sum: float = 0.0
         self._res_count: int = 0
         self._res_current: float = 0.0
+        # gauge stats
+        self._gauge_sum: float = 0.0
+        self._gauge_count: int = 0
 
     # ---- Active rail helpers ----
     def has_active_rail(self) -> bool:
@@ -115,6 +118,20 @@ class SensorState:
         self._res_sum = 0.0
         self._res_count = 0
         self._res_current = 0.0
+
+    # ---- Gauge (mm_gauge) stats helpers ----
+    def update_gauge(self, value: float) -> None:
+        self._gauge_sum += float(value)
+        self._gauge_count += 1
+
+    def get_gauge_average(self) -> float:
+        if self._gauge_count == 0:
+            return 0.0
+        return float(self._gauge_sum / self._gauge_count)
+
+    def reset_gauge_stats(self) -> None:
+        self._gauge_sum = 0.0
+        self._gauge_count = 0
 
     # ---- Sides counts (for active rail) ----
     def get_left_right_counts(self) -> tuple[int, int]:

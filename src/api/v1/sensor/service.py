@@ -54,6 +54,60 @@ class SensorService(BaseService):
         await self.redis.set(cache_key, entry.model_dump_json(), expire=300)
         return entry
 
+    async def _publish_error(self, *, timestamp: datetime, description: str, value_name: str, value: float) -> None:
+        await self.redis.publish(
+            "dashboard:errors",
+            json.dumps(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "description": description,
+                    "value_name": value_name,
+                    "value": value,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    async def _publish_stages_empty(self) -> None:
+        await self.redis.publish(
+            "dashboard:stages",
+            json.dumps({}, ensure_ascii=False),
+        )
+
+    async def _publish_stages(
+        self,
+        *,
+        errors_count: int,
+        left_val: float,
+        left_ok: bool,
+        right_val: float,
+        right_ok: bool,
+        screws_completed: int,
+        resistance: float,
+        resistance_ok: bool,
+        gauge: float,
+        gauge_ok: bool,
+        gauge_avg: float,
+    ) -> None:
+        await self.redis.publish(
+            "dashboard:stages",
+            json.dumps(
+                {
+                    "errors_count": errors_count,
+                    "mm_side_wear_left": left_val,
+                    "mm_side_wear_left_ok": left_ok,
+                    "mm_side_wear_right": right_val,
+                    "mm_side_wear_right_ok": right_ok,
+                    "screws_completed": screws_completed,
+                    "resistance": resistance,
+                    "resistance_ok": resistance_ok,
+                    "mm_gauge": gauge,
+                    "mm_gauge_ok": gauge_ok,
+                    "mm_gauge_avg": gauge_avg,
+                },
+                ensure_ascii=False,
+            ),
+        )
     async def _track_bad_range(
         self,
         metric_key: str,
@@ -84,17 +138,11 @@ class SensorService(BaseService):
                         is_critical=res_threshold.is_critical,
                     )
                 )
-                await self.redis.publish(
-                    "dashboard:errors",
-                    json.dumps(
-                        {
-                            "timestamp": datetime.now().isoformat(),
-                            "description": f"{self.METRIC_DISPLAY.get(metric_key, metric_key)} было неприемлемым с {start_mm} мм по {current_mm} мм",
-                            "value_name": metric_key,
-                            "value": start_value,
-                        },
-                        ensure_ascii=False,
-                    ),
+                await self._publish_error(
+                    timestamp=datetime.now(),
+                    description=f"{self.METRIC_DISPLAY.get(metric_key, metric_key)} было неприемлемым с {start_mm} мм по {current_mm} мм",
+                    value_name=metric_key,
+                    value=start_value,
                 )
 
     async def get_threshold_data(self) -> Thresholds:
@@ -121,9 +169,10 @@ class SensorService(BaseService):
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
 
         if not self.state.has_active_rail():
+            await self._publish_stages_empty()
             return
         active = self.state.get_active_rail()
-        current_mm = active.last_mm_along_rail if active else 0
+        self.state.update_resistance(float(sensor2_data.values.resistance))
 
         res_threshold = await self.get_threshold("resistance")
         if res_threshold:
@@ -131,7 +180,7 @@ class SensorService(BaseService):
                 metric_key="resistance",
                 res_threshold=res_threshold,
                 res_value=sensor2_data.values.resistance,
-                current_mm=current_mm,
+                current_mm=active.last_mm_along_rail if active else 0,
                 active=active,
             )
 
@@ -165,17 +214,11 @@ class SensorService(BaseService):
                 if errors_to_add:
                     await self.uow.error.add_many(errors_to_add)
                     for err in errors_to_add:
-                        await self.redis.publish(
-                            "dashboard:errors",
-                            json.dumps(
-                                {
-                                    "timestamp": sensor2_data.timestamp.isoformat(),
-                                    "description": err.description,
-                                    "value_name": err.value_name,
-                                    "value": err.value,
-                                },
-                                ensure_ascii=False,
-                            ),
+                        await self._publish_error(
+                            timestamp=sensor2_data.timestamp,
+                            description=err.description,
+                            value_name=err.value_name,
+                            value=err.value,
                         )
                 self.state.clear_screw_session()
             return
@@ -238,6 +281,7 @@ class SensorService(BaseService):
                         active=active,
                     )
                 self.state.update_active_progress(data.values.mm_along_rail, data.timestamp)
+                self.state.update_gauge(float(data.values.mm_gauge))
                 await self.uow.sensor1.add(
                     Sensor1(
                         rail_id=active.rail_id,
@@ -245,12 +289,42 @@ class SensorService(BaseService):
                         **data.values.model_dump(),
                     )
                 )
+                th_left = await self.get_threshold("mm_side_wear_left")
+                th_right = await self.get_threshold("mm_side_wear_right")
+                th_res = await self.get_threshold("resistance")
+                th_gauge = await self.get_threshold("mm_gauge")
+                left_val = data.values.mm_side_wear_left
+                right_val = data.values.mm_side_wear_right
+                left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
+                right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
+                res_cur = self.state.get_resistance_current()
+                res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
+                gauge_cur = data.values.mm_gauge
+                gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
+                errors_count = await self.uow.error.count_by_rail(active.rail_id)
+                screws_completed = self.state.get_total_screws()
+                mm_gauge_avg = self.state.get_gauge_average()
+                await self._publish_stages(
+                    errors_count=errors_count,
+                    left_val=left_val,
+                    left_ok=left_ok,
+                    right_val=right_val,
+                    right_ok=right_ok,
+                    screws_completed=screws_completed,
+                    resistance=res_cur,
+                    resistance_ok=res_ok,
+                    gauge=gauge_cur,
+                    gauge_ok=gauge_ok,
+                    gauge_avg=mm_gauge_avg,
+                )
             elif data.values.mm_along_rail == 0:
                 await self.close_active_rail()
             return
 
         if data.values.mm_along_rail > 0:
             await self.bind_active_rail(data)
+        else:
+            await self._publish_stages_empty()
         return
 
     async def close_active_rail(self) -> None:
@@ -274,17 +348,11 @@ class SensorService(BaseService):
                     is_critical=th.is_critical,
                 )
             )
-            await self.redis.publish(
-                "dashboard:errors",
-                json.dumps(
-                    {
-                        "timestamp": (active.last_timestamp.isoformat() if active.last_timestamp else datetime.now().isoformat()),
-                        "description": f"{self.METRIC_DISPLAY.get(key, key)} было неприемлемым с {start_mm} мм по {end_mm} мм",
-                        "value_name": key,
-                        "value": start_value,
-                    },
-                    ensure_ascii=False,
-                ),
+            await self._publish_error(
+                timestamp=(active.last_timestamp if active.last_timestamp else datetime.now()),
+                description=f"{self.METRIC_DISPLAY.get(key, key)} было неприемлемым с {start_mm} мм по {end_mm} мм",
+                value_name=key,
+                value=start_value,
             )
         completed_rail = await self.uow.rail.update_fields(
             rail_id=active.rail_id,
@@ -295,10 +363,18 @@ class SensorService(BaseService):
         active.end_time = completed_rail.end_time
         self.state.append_closed(active)
         self.state.clear_active()
+        self.state.reset_resistance_stats()
+        self.state.reset_gauge_stats()
+        self.state.reset_total_screws()
+        self.state.clear_screw_session()
+        await self._publish_stages_empty()
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
         self.state.reset_total_screws()
         self.state.clear_screw_session()
+        self.state.reset_resistance_stats()
+        self.state.reset_gauge_stats()
+        
         rail = await self.uow.rail.add(Rail(start_time=data.timestamp))
         self.state.set_active(RailSession(
             rail_id=rail.rail_id,
@@ -310,6 +386,7 @@ class SensorService(BaseService):
         # Первичное отслеживание диапазонов для метрик Sensor1
         active = self.state.get_active_rail()
         current_mm = int(data.values.mm_along_rail)
+        self.state.update_gauge(float(data.values.mm_gauge))
         for key in self.S1_RANGE_KEYS:
             th = await self.get_threshold(key)
             if th is None:
