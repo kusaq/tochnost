@@ -1,10 +1,12 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 
+from api.v1.sensor.state import SENSOR_STATE
 from infra.timescale_db.ts_db import get_unscoped_db
 from infra.timescale_db.uow import TimeScaleDBUnitOfWork
 from infra.redis.redis_api import RedisAPI
@@ -59,8 +61,45 @@ async def run_push_stats(ws: WebSocket, redis: RedisAPI) -> None:
                 },
             }
             await ws.send_text(json.dumps(message, ensure_ascii=False))
-            await asyncio.sleep(2)
         except asyncio.CancelledError:
             break
         except Exception:
             pass
+        finally:
+            await asyncio.sleep(2)
+
+
+async def run_push_status(ws: WebSocket) -> None:
+    while ws.client_state == WebSocketState.CONNECTED:
+        try:
+            message: dict[Any, Any] = {
+                "channel": "dashboard:status",
+            }
+
+            active = SENSOR_STATE.get_active_rail()
+            if not active:
+                message["data"] = {}
+                await ws.send_text(json.dumps(message, ensure_ascii=False))
+                await asyncio.sleep(2)
+                continue
+
+            async with get_unscoped_db() as db:
+                uow = TimeScaleDBUnitOfWork(db)
+                rail = await uow.rail.get_by_id(active.rail_id)
+
+            message["data"] = {
+                "rail_id": rail.rail_id,
+                "name": rail.name,
+                "status": rail.status.value,
+                "object_name": rail.object_name,
+                "fastening_type": rail.fastening_type,
+                "start_time": rail.start_time.isoformat() if rail.start_time else None,
+                "end_time": rail.end_time.isoformat() if rail.end_time else None,
+            }
+            await ws.send_text(json.dumps(message, ensure_ascii=False))
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+        finally:
+            await asyncio.sleep(2)
