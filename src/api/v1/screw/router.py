@@ -9,7 +9,7 @@ router = APIRouter(tags=["Screw"])
 
 
 @router.get(
-    "/screw/{rail_id}",
+    "/rail/{rail_id}/screws",
     response_model=list[ScrewRead],
     summary="Список гаек по рельсе",
     description="Возвращает все гайки рельсы в порядке возрастания их порядкового номера (serial_id).",
