@@ -217,7 +217,7 @@ class SensorService(BaseService):
                     await self.uow.error.add_many(errors_to_add)
                     for err in errors_to_add:
                         await self._publish_error(
-                            timestamp=sensor2_data.timestamp,
+            timestamp=sensor2_data.timestamp,
                             description=err.description,
                             value_name=err.value_name,
                             value=err.value,
@@ -327,6 +327,45 @@ class SensorService(BaseService):
                 )
             elif data.values.mm_along_rail == 0:
                 await self.close_active_rail()
+            else:
+                # Если произошёл откат более чем на 5% текущего прогресса — закрываем рельсу и открываем новую
+                last_mm = max(1, int(active.last_mm_along_rail))
+                curr_mm = int(data.values.mm_along_rail)
+                if curr_mm < active.last_mm_along_rail:
+                    decrease_ratio = (last_mm - curr_mm) / float(last_mm)
+                    if decrease_ratio > 0.05:
+                        await self.close_active_rail()
+                        await self.bind_active_rail(data)
+                    else:
+                        # Меньше 5% — сохраняем измерение, но фиксируем сбой датчика
+                        await self.uow.sensor1.add(
+                            Sensor1(
+                                rail_id=active.rail_id,
+                                timestamp=data.timestamp,
+                                **data.values.model_dump(),
+                            )
+                        )
+                        delta_mm = float(last_mm - curr_mm)
+                        description = f"Сбой датчика расстояния: откат {delta_mm:.0f} мм ({decrease_ratio * 100:.2f}%)"
+                        await self.uow.error.add(
+                            Error(
+                                rail_id=active.rail_id,
+                                screw_id=None,
+                                value_name="mm_along_rail_backtrack",
+                                description=description,
+                                unit_of_measurement="мм",
+                                value=delta_mm,
+                                min_value=0.0,
+                                max_value=0.0,
+                                is_critical=False,
+                            )
+                        )
+                        await self._publish_error(
+                            timestamp=data.timestamp,
+                            description=description,
+                            value_name="mm_along_rail_backtrack",
+                            value=delta_mm,
+                        )
             return
 
         if data.values.mm_along_rail > 0:
