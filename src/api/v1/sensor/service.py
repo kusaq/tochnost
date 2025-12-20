@@ -402,3 +402,6 @@ class SensorService(BaseService):
         await self.uow.sensor1.add(
             Sensor1(rail_id=rail.rail_id, timestamp=data.timestamp, **data.values.model_dump())
         )
+
+    async def list_sensor1_by_rail(self, rail_id: int, *, limit: int = 20, offset: int = 0):
+        return await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=limit, offset=offset)

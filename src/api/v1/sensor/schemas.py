@@ -173,3 +173,35 @@ class ThresholdEntry(BaseModel):
 
 class Thresholds(BaseModel):
     thresholds: dict[str, ThresholdEntry]
+
+
+class Sensor1Read(BaseModel):
+    sensor1_id: int = Field(description="Идентификатор записи Sensor1")
+    rail_id: int = Field(description="Идентификатор рельсы")
+    timestamp: datetime = Field(description="Метка времени измерения")
+
+    encoder1: int = Field(description="значение энкодера 1")
+    encoder2: int = Field(description="значение энкодера 2")
+    encoder3: int = Field(description="значение энкодера 3")
+    encoder4: int = Field(description="значение энкодера 4")
+
+    mm_along_rail: int = Field(description="расстояние в мм от начала РШР")
+
+    laser_on_rail_left: bool = Field(description="лазерная полоса попадает на левый рельс (для забега)")
+    laser_on_rail_right: bool = Field(description="лазерная полоса попадает на правый рельс (для забега)")
+    laser_on_tie_left: bool = Field(description="лазерная полоса попадает на шпалу слева (для эпюры)")
+    laser_on_tie_right: bool = Field(description="лазерная полоса попадает на шпалу справа (для эпюры)")
+
+    mm_gauge: float = Field(description="ширина колеи в мм")
+    mm_side_wear_left: float = Field(description="боковой износ левого рельса в мм")
+    mm_side_wear_right: float = Field(description="боковой износ правого рельса в мм")
+    mm_vertical_wear_left: float = Field(description="вертикальный износ левого рельса в мм")
+    mm_vertical_wear_right: float = Field(description="вертикальный износ правого рельса в мм")
+
+    rad_rail_tilt_left: float = Field(description="подуклонка левого рельса в рад")
+    rad_rail_tilt_right: float = Field(description="подуклонка правого рельса в рад")
+
+    mm_bolt_height_left_inner: float = Field(description="высота внутреннего болта левого рельса в мм")
+    mm_bolt_height_left_outer: float = Field(description="высота внешнего болта левого рельса в мм")
+    mm_bolt_height_right_inner: float = Field(description="высота внутреннего болта правого рельса в мм")
+    mm_bolt_height_right_outer: float = Field(description="высота внешнего болта правого рельса в мм")
