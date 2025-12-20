@@ -11,6 +11,11 @@ class RailStatus(PyEnum):
         IN_PROGRESS = "В процессе"
         COMPLETED = "Завершено"
 
+class RailSide(PyEnum):
+        LEFT = "Левая"
+        RIGHT = "Правая"
+        CENTER = "Центральная"
+
 
 class Rail(Base, CreateTimestampMixin):
     __tablename__ = "rail"
@@ -21,6 +26,11 @@ class Rail(Base, CreateTimestampMixin):
         Enum(RailStatus, name="rail_status", native_enum=False),
         nullable=False,
         default=RailStatus.IN_PROGRESS,
+    )
+    side: Mapped[RailSide | None] = mapped_column(
+        Enum(RailSide, name="rail_side", native_enum=False),
+        nullable=True,
+        comment="Сторона рельса: левая/правая/центральная",
     )
     object_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     fastening_type: Mapped[str | None] = mapped_column(String(255), nullable=True)

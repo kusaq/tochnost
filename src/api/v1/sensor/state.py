@@ -134,6 +134,29 @@ class SensorState:
         self._gauge_count = 0
 
     # ---- Sides counts (for active rail) ----
+    def reset_laser_counts(self) -> None:
+        self._laser_left_true_count = 0
+        self._laser_right_true_count = 0
+
+    def record_laser_flags(self, left_on_rail: bool, right_on_rail: bool) -> None:
+        """
+        Учитывает текущие показания попадания лазера на рельс слева/справа.
+        """
+        # Инициализация на лету, если не вызывали reset явно
+        if not hasattr(self, "_laser_left_true_count"):
+            self._laser_left_true_count = 0
+            self._laser_right_true_count = 0
+        if left_on_rail:
+            self._laser_left_true_count += 1
+        if right_on_rail:
+            self._laser_right_true_count += 1
+
+    def get_laser_counts(self) -> tuple[int, int]:
+        if not hasattr(self, "_laser_left_true_count"):
+            self._laser_left_true_count = 0
+            self._laser_right_true_count = 0
+        return int(self._laser_left_true_count), int(self._laser_right_true_count)
+
     def get_left_right_counts(self) -> tuple[int, int]:
         """
         Возвращает (left_count, right_count) исходя из общего количества гаек:

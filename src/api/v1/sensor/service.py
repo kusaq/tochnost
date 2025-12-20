@@ -6,7 +6,7 @@ from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 from api.v1.sensor.state import SensorState
-from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error
+from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error, RailSide
 
 
 class SensorService(BaseService):
@@ -266,6 +266,11 @@ class SensorService(BaseService):
                 return
 
             if data.values.mm_along_rail >= active.last_mm_along_rail:
+                # Копим статистику по лазерам для определения стороны рельсы
+                self.state.record_laser_flags(
+                    left_on_rail=bool(data.values.laser_on_rail_left),
+                    right_on_rail=bool(data.values.laser_on_rail_right),
+                )
                 # Отслеживание диапазонов для метрик Sensor1 на текущем мм
                 current_mm = data.values.mm_along_rail
                 for key in self.S1_RANGE_KEYS:
@@ -359,6 +364,7 @@ class SensorService(BaseService):
             status=RailStatus.COMPLETED,
             end_time=active.last_timestamp,
             sleepers=math.ceil(self.state.get_total_screws() / 4),
+            side=self._resolve_rail_side(),
         )
         active.end_time = completed_rail.end_time
         self.state.append_closed(active)
@@ -367,6 +373,7 @@ class SensorService(BaseService):
         self.state.reset_gauge_stats()
         self.state.reset_total_screws()
         self.state.clear_screw_session()
+        self.state.reset_laser_counts()
         await self._publish_stages_empty()
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
@@ -374,6 +381,8 @@ class SensorService(BaseService):
         self.state.clear_screw_session()
         self.state.reset_resistance_stats()
         self.state.reset_gauge_stats()
+        # инициализация счётчиков лазеров для новой активной рельсы
+        self.state.reset_laser_counts()
         
         rail = await self.uow.rail.add(Rail(start_time=data.timestamp))
         self.state.set_active(RailSession(
@@ -387,6 +396,11 @@ class SensorService(BaseService):
         active = self.state.get_active_rail()
         current_mm = int(data.values.mm_along_rail)
         self.state.update_gauge(float(data.values.mm_gauge))
+        # Запишем первый замер лазерных флагов
+        self.state.record_laser_flags(
+            left_on_rail=bool(data.values.laser_on_rail_left),
+            right_on_rail=bool(data.values.laser_on_rail_right),
+        )
         for key in self.S1_RANGE_KEYS:
             th = await self.get_threshold(key)
             if th is None:
@@ -405,3 +419,17 @@ class SensorService(BaseService):
 
     async def list_sensor1_by_rail(self, rail_id: int, *, limit: int = 20, offset: int = 0):
         return await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=limit, offset=offset)
+
+    def _resolve_rail_side(self) -> RailSide | None:
+        """
+        Определяет сторону рельсы по накопленным значениям:
+        - если |left - right| <= 1 — Центральная
+        - иначе — сторона с большим количеством True.
+        """
+        left, right = self.state.get_laser_counts()
+        diff = abs(left - right)
+        if left == 0 and right == 0:
+            return None
+        if diff <= 1:
+            return RailSide.CENTER
+        return RailSide.LEFT if left > right else RailSide.RIGHT
