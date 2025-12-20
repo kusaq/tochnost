@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from api.v1.auth.dependencies import CurrentUserDep
 from api.v1.screw.dependencies import ScrewServiceDep
-from api.v1.screw.schemas import ScrewRead, ScrewDetail
+from api.v1.screw.schemas import ScrewRead, ScrewDetail, ScrewWithLastSensor
 
 
 router = APIRouter(tags=["Screw"])
@@ -37,3 +37,17 @@ async def get_screw(
     user: CurrentUserDep,
 ):
     return await service.get_detail(screw_id)
+
+
+@router.get(
+    "/rail/{rail_id}/screws/sensors",
+    response_model=list[ScrewWithLastSensor],
+    summary="Список гаек с последними показаниями Sensor2",
+    description="По рельсе возвращает гайки и их последний замер Sensor2 по соответствующему каналу.",
+)
+async def list_screws_with_sensors(
+    rail_id: int,
+    service: ScrewServiceDep,
+    user: CurrentUserDep,
+):
+    return await service.list_with_last_sensor2_by_rail(rail_id=rail_id)

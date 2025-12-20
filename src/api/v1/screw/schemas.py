@@ -26,3 +26,8 @@ class ScrewDetail(BaseModel):
     screw: ScrewRead = Field(description="Информация о гайке")
     sensor2: list[Sensor2Snapshot] = Field(default_factory=list, description="Список замеров Sensor2 по каналу гайки")
     errors: list[ErrorRead] = Field(default_factory=list, description="Ошибки, связанные с гайкой")
+
+
+class ScrewWithLastSensor(BaseModel):
+    screw: ScrewRead = Field(description="Информация о гайке")
+    last_sensor2: Sensor2Snapshot | None = Field(default=None, description="Последний замер Sensor2 по каналу гайки")

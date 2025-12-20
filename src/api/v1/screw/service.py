@@ -4,7 +4,7 @@ from fastapi import status
 from fastapi.exceptions import HTTPException
 
 from api.v1.base.service import BaseService
-from api.v1.screw.schemas import ScrewRead, ScrewDetail, Sensor2Snapshot
+from api.v1.screw.schemas import ScrewRead, ScrewDetail, Sensor2Snapshot, ScrewWithLastSensor
 from infra.timescale_db.models import Screw
 from api.v1.error.schemas import ErrorRead
 
@@ -39,3 +39,28 @@ class ScrewService(BaseService):
             sensor2=snapshots,
             errors=[ErrorRead.model_validate(e, from_attributes=True) for e in errors],
         )
+
+    async def list_with_last_sensor2_by_rail(self, rail_id: int) -> list[ScrewWithLastSensor]:
+        screws = await self.uow.screw.list_by_rail(rail_id=rail_id)
+        result: list[ScrewWithLastSensor] = []
+        for screw in screws:
+            last = await self.uow.sensor2.get_last_by_screw(screw.screw_id)
+            snapshot: Sensor2Snapshot | None = None
+            if last:
+                ch = ((screw.serial_id - 1) % 4) + 1
+                snapshot = Sensor2Snapshot(
+                    timestamp=last.timestamp,
+                    resistance=last.resistance,
+                    temperature=last.temperature,
+                    humidity=last.humidity,
+                    frequency_status=getattr(last, f"frequency_status_{ch}"),
+                    frequency_torque=getattr(last, f"frequency_torque_{ch}"),
+                    converter_frequency=getattr(last, f"converter_frequency_{ch}"),
+                )
+            result.append(
+                ScrewWithLastSensor(
+                    screw=ScrewRead.model_validate(screw, from_attributes=True),
+                    last_sensor2=snapshot,
+                )
+            )
+        return result
