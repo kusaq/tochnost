@@ -83,6 +83,10 @@ class SensorService(BaseService):
         left_ok: bool,
         right_val: float,
         right_ok: bool,
+        vleft_val: float,
+        vleft_ok: bool,
+        vright_val: float,
+        vright_ok: bool,
         screws_completed: int,
         resistance: float,
         resistance_ok: bool,
@@ -100,6 +104,10 @@ class SensorService(BaseService):
                     "mm_side_wear_left_ok": left_ok,
                     "mm_side_wear_right": right_val,
                     "mm_side_wear_right_ok": right_ok,
+                    "mm_vertical_wear_left": vleft_val,
+                    "mm_vertical_wear_left_ok": vleft_ok,
+                    "mm_vertical_wear_right": vright_val,
+                    "mm_vertical_wear_right_ok": vright_ok,
                     "screws_completed": screws_completed,
                     "resistance": resistance,
                     "resistance_ok": resistance_ok,
@@ -298,12 +306,18 @@ class SensorService(BaseService):
                 )
                 th_left = await self.get_threshold("mm_side_wear_left")
                 th_right = await self.get_threshold("mm_side_wear_right")
+                th_vleft = await self.get_threshold("mm_vertical_wear_left")
+                th_vright = await self.get_threshold("mm_vertical_wear_right")
                 th_res = await self.get_threshold("resistance")
                 th_gauge = await self.get_threshold("mm_gauge")
                 left_val = data.values.mm_side_wear_left
                 right_val = data.values.mm_side_wear_right
+                vleft_val = data.values.mm_vertical_wear_left
+                vright_val = data.values.mm_vertical_wear_right
                 left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
                 right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
+                vleft_ok = True if th_vleft is None else (th_vleft.min_value <= vleft_val <= th_vleft.max_value)
+                vright_ok = True if th_vright is None else (th_vright.min_value <= vright_val <= th_vright.max_value)
                 res_cur = self.state.get_resistance_current()
                 res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
                 gauge_cur = data.values.mm_gauge
@@ -318,6 +332,10 @@ class SensorService(BaseService):
                     left_ok=left_ok,
                     right_val=right_val,
                     right_ok=right_ok,
+                    vleft_val=vleft_val,
+                    vleft_ok=vleft_ok,
+                    vright_val=vright_val,
+                    vright_ok=vright_ok,
                     screws_completed=screws_completed,
                     resistance=res_cur,
                     resistance_ok=res_ok,
