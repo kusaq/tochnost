@@ -78,6 +78,7 @@ class SensorService(BaseService):
         self,
         *,
         errors_count: int,
+        current_mm: int,
         left_val: float,
         left_ok: bool,
         right_val: float,
@@ -94,6 +95,7 @@ class SensorService(BaseService):
             json.dumps(
                 {
                     "errors_count": errors_count,
+                    "mmAlongRail": current_mm,
                     "mm_side_wear_left": left_val,
                     "mm_side_wear_left_ok": left_ok,
                     "mm_side_wear_right": right_val,
@@ -311,6 +313,7 @@ class SensorService(BaseService):
                 mm_gauge_avg = self.state.get_gauge_average()
                 await self._publish_stages(
                     errors_count=errors_count,
+                    current_mm=current_mm,
                     left_val=left_val,
                     left_ok=left_ok,
                     right_val=right_val,

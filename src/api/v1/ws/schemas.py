@@ -23,6 +23,7 @@ class DashboardErrorsEnvelope(BaseModel):
 
 class DashboardStagesData(BaseModel):
     errors_count: int = Field(description="Количество ошибок по текущей рельсе")
+    mmAlongRail: int = Field(description="Текущее положение вдоль рельсы (мм) от начала РШР")
     mm_side_wear_left: float = Field(description="Износ левого рельса (мм)")
     mm_side_wear_left_ok: bool = Field(description="Значение износа слева в норме")
     mm_side_wear_right: float = Field(description="Износ правого рельса (мм)")
