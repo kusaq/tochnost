@@ -14,7 +14,7 @@ class DevelopmentConfig(BaseSettings):
     # CORS settings
     cors_origins: list[str] = [
         "http://localhost",
-        "http://localhost:5173"
+        "http://localhost:5173",
         "https://rzd-snowy.vercel.app"
     ]
     cors_allow_credentials: bool = True
