@@ -18,13 +18,13 @@ def _init_router(_app: FastAPI) -> None:
 
 
 def _init_middleware(_app: FastAPI) -> None:
-    _app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=settings.cors_allow_credentials,
-        allow_methods=settings.cors_allow_methods,
-        allow_headers=settings.cors_allow_headers,
-    )
+    # _app.add_middleware(
+    #     CORSMiddleware,
+    #     allow_origins=settings.cors_origins,
+    #     allow_credentials=settings.cors_allow_credentials,
+    #     allow_methods=settings.cors_allow_methods,
+    #     allow_headers=settings.cors_allow_headers,
+    # )
 
     _app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
     _app.add_middleware(SlidingSessionMiddleware)
