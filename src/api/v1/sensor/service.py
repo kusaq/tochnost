@@ -248,7 +248,7 @@ class SensorService(BaseService):
             )
         await self.uow.sensor2.add_many(sensors)
 
-    async def add_screw(self, frequency_torque: int, ts: datetime) -> int:
+    async def add_screw(self, frequency_torque: float, ts: datetime) -> int:
         serial_number = self.state.next_serial()
         active = self.state.get_active_rail()
         screw = await self.uow.screw.add(Screw(rail_id=active.rail_id, serial_id=serial_number))

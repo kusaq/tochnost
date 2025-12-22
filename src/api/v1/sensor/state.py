@@ -62,7 +62,7 @@ class SensorState:
     def append_screw(self, screw: ScrewDC) -> None:
         self._screw_session.append(screw)
 
-    def update_screw_max_torque(self, index: int, new_value: int) -> None:
+    def update_screw_max_torque(self, index: int, new_value: float) -> None:
         current = self._screw_session[index].frequency_torque
         self._screw_session[index].frequency_torque = max(current, new_value)
 

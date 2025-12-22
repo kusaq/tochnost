@@ -9,7 +9,7 @@ class Screw:
     screw_id: int
     serial_id: int
     timestamp: datetime
-    frequency_torque: int
+    frequency_torque: float
 
 
 @dataclass(slots=True)
@@ -126,15 +126,15 @@ class Sensor2Values(BaseModel):
     frequency_status_3: int = Field(description="Состояние ПЧ 3", validation_alias=AliasChoices("ST3", "frequency_status_3"))
     frequency_status_4: int = Field(description="Состояние ПЧ 4", validation_alias=AliasChoices("ST4", "frequency_status_4"))
 
-    frequency_torque_1: int = Field(description="Момент ПЧ 1", validation_alias=AliasChoices("M1", "frequency_torque_1"))
-    frequency_torque_2: int = Field(description="Момент ПЧ 2", validation_alias=AliasChoices("M2", "frequency_torque_2"))
-    frequency_torque_3: int = Field(description="Момент ПЧ 3", validation_alias=AliasChoices("M3", "frequency_torque_3"))
-    frequency_torque_4: int = Field(description="Момент ПЧ 4", validation_alias=AliasChoices("M4", "frequency_torque_4"))
+    frequency_torque_1: float = Field(description="Момент ПЧ 1", validation_alias=AliasChoices("M1", "frequency_torque_1"))
+    frequency_torque_2: float = Field(description="Момент ПЧ 2", validation_alias=AliasChoices("M2", "frequency_torque_2"))
+    frequency_torque_3: float = Field(description="Момент ПЧ 3", validation_alias=AliasChoices("M3", "frequency_torque_3"))
+    frequency_torque_4: float = Field(description="Момент ПЧ 4", validation_alias=AliasChoices("M4", "frequency_torque_4"))
 
-    converter_frequency_1: int = Field(description="Частота ПЧ 1", validation_alias=AliasChoices("f1", "converter_frequency_1"))
-    converter_frequency_2: int = Field(description="Частота ПЧ 2", validation_alias=AliasChoices("f2", "converter_frequency_2"))
-    converter_frequency_3: int = Field(description="Частота ПЧ 3", validation_alias=AliasChoices("f3", "converter_frequency_3"))
-    converter_frequency_4: int = Field(description="Частота ПЧ 4", validation_alias=AliasChoices("f4", "converter_frequency_4"))
+    converter_frequency_1: float = Field(description="Частота ПЧ 1", validation_alias=AliasChoices("f1", "converter_frequency_1"))
+    converter_frequency_2: float = Field(description="Частота ПЧ 2", validation_alias=AliasChoices("f2", "converter_frequency_2"))
+    converter_frequency_3: float = Field(description="Частота ПЧ 3", validation_alias=AliasChoices("f3", "converter_frequency_3"))
+    converter_frequency_4: float = Field(description="Частота ПЧ 4", validation_alias=AliasChoices("f4", "converter_frequency_4"))
 
     def all_frequency_status_zero(self) -> bool:
         return (
