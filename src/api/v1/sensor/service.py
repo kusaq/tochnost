@@ -183,21 +183,33 @@ class SensorService(BaseService):
         await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
 
-        if not self.state.has_active_rail():
-            await self._publish_stages_empty()
-            return
         active = self.state.get_active_rail()
-        self.state.update_resistance(float(sensor2_data.values.resistance))
+        is_closed_rail = False
+        
+        if not active:
+            # Если нет активной рельсы, берём последнюю закрытую
+            last_closed = self.state.last_closed()
+            if last_closed:
+                # Создаём временный RailSession для работы с закрытой рельсой
+                active = last_closed
+                is_closed_rail = True
+            else:
+                await self._publish_stages_empty()
+                return
+        
+        # Обновляем resistance только для активной рельсы
+        if not is_closed_rail:
+            self.state.update_resistance(float(sensor2_data.values.resistance))
 
-        res_threshold = await self.get_threshold("resistance")
-        if res_threshold:
-            await self._track_bad_range(
-                metric_key="resistance",
-                res_threshold=res_threshold,
-                res_value=sensor2_data.values.resistance,
-                current_mm=active.last_mm_along_rail if active else 0,
-                active=active,
-            )
+            res_threshold = await self.get_threshold("resistance")
+            if res_threshold:
+                await self._track_bad_range(
+                    metric_key="resistance",
+                    res_threshold=res_threshold,
+                    res_value=sensor2_data.values.resistance,
+                    current_mm=active.last_mm_along_rail if active else 0,
+                    active=active,
+                )
 
         if sensor2_data.values.all_frequency_status_zero():
             if self.state.has_screw_session:
