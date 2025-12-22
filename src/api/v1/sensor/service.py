@@ -1,12 +1,17 @@
 from datetime import datetime
 import math
 import json
+import asyncio
 
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
 from api.v1.sensor.state import SensorState
 from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error, RailSide
+from infra.timescale_db.ts_db import get_unscoped_db
+from infra.redis.redis_api import RedisAPI
+from infra.timescale_db.uow import TimeScaleDBUnitOfWork
+from api.v1.sensor.state import SENSOR_STATE
 
 
 class SensorService(BaseService):
@@ -493,3 +498,58 @@ class SensorService(BaseService):
         if diff <= 1:
             return RailSide.CENTER
         return RailSide.LEFT if left > right else RailSide.RIGHT
+
+# ---- Queue workers for high-throughput ingestion ----
+async def _sensor1_worker(worker_id: int, state: SensorState) -> None:
+    redis = RedisAPI()
+    while True:
+        item: Sensor1Create = await state.sensor1_queue().get()
+        try:
+            async with get_unscoped_db() as db:
+                uow = TimeScaleDBUnitOfWork(db)
+                service = SensorService(uow=uow, redis=redis)
+                service.state = state
+                await service.add_sensor1_data(item)
+        finally:
+            state.sensor1_queue().task_done()
+
+
+async def _sensor2_worker(worker_id: int, state: SensorState) -> None:
+    redis = RedisAPI()
+    while True:
+        item: Sensor2Create = await state.sensor2_queue().get()
+        try:
+            async with get_unscoped_db() as db:
+                uow = TimeScaleDBUnitOfWork(db)
+                service = SensorService(uow=uow, redis=redis)
+                service.state = state
+                await service.add_sensor2_data(item)
+        finally:
+            state.sensor2_queue().task_done()
+
+
+_workers_started = False
+_worker_tasks: list[asyncio.Task] = []
+
+
+async def start_sensor_workers(s1_workers: int = 1, s2_workers: int = 1) -> list[asyncio.Task]:
+    global _workers_started, _worker_tasks
+    if _workers_started:
+        return _worker_tasks
+    tasks: list[asyncio.Task] = []
+    state = SENSOR_STATE
+    for i in range(s1_workers):
+        tasks.append(asyncio.create_task(_sensor1_worker(i + 1, state)))
+    for i in range(s2_workers):
+        tasks.append(asyncio.create_task(_sensor2_worker(i + 1, state)))
+    _worker_tasks = tasks
+    _workers_started = True
+    return tasks
+
+
+async def stop_sensor_workers() -> None:
+    global _workers_started, _worker_tasks
+    for t in _worker_tasks:
+        t.cancel()
+    _workers_started = False
+    _worker_tasks = []

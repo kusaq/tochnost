@@ -1,4 +1,5 @@
 from collections import deque
+import asyncio
 from datetime import datetime
 from typing import Deque, Annotated
 
@@ -16,6 +17,9 @@ class SensorState:
         self._closed: Deque[RailSession] = deque(maxlen=closed_keep_limit)
         self._total_screws: int = 0
         self._screw_session: Deque[ScrewDC] = deque()
+        # high-throughput ingestion queues
+        self._sensor1_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+        self._sensor2_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
         # generic bad ranges by metric key: key -> (start_mm, start_value)
         self._bad_ranges: dict[str, tuple[int, float]] = {}
         # resistance stats
@@ -68,6 +72,13 @@ class SensorState:
 
     def iter_screws(self):
         return iter(self._screw_session)
+
+    # ---- Ingestion queues ----
+    def sensor1_queue(self) -> asyncio.Queue:
+        return self._sensor1_queue
+
+    def sensor2_queue(self) -> asyncio.Queue:
+        return self._sensor2_queue
 
     # ---- Generic bad range helpers ----
     def is_bad_range_active(self, key: str) -> bool:

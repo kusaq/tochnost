@@ -1,26 +1,33 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 
 from api.v1.sensor.dependencies import SensorServiceDep
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read
+from api.v1.sensor.state import SensorStateDep
 from api.v1.base.dependencies import PaginationDep
 
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
 
 
-@router.post("/first")
+@router.post("/first", status_code=status.HTTP_202_ACCEPTED, summary="Буферизованная запись Sensor1")
 async def save_first_sensor_data(
     sensor_data: Sensor1Create,
-    sensor_service: SensorServiceDep
-) -> None:
-    await sensor_service.add_sensor1_data(sensor_data)
+    # sensor_service: SensorServiceDep,
+    state: SensorStateDep,
+) -> Response:
+    # Вставляем в очередь для асинхронной обработки воркерами
+    await state.sensor1_queue().put(sensor_data)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
-@router.post("/second")
+@router.post("/second", status_code=status.HTTP_202_ACCEPTED, summary="Буферизованная запись Sensor2")
 async def save_second_sensor_data(
     sensor_data: Sensor2Create,
-    sensor_service: SensorServiceDep
-) -> None:
-    await sensor_service.add_sensor2_data(sensor_data)
+    # sensor_service: SensorServiceDep,
+    state: SensorStateDep,
+) -> Response:
+    # Вставляем в очередь для асинхронной обработки воркерами
+    await state.sensor2_queue().put(sensor_data)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.get(
