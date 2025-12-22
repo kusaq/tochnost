@@ -2,6 +2,8 @@ from sqlalchemy import select, desc
 
 from infra.timescale_db.models import Sensor2
 from infra.timescale_db.storage.base_storage import PostgresStorage
+from sqlalchemy import select, desc, join
+from infra.timescale_db.models import Screw
 
 
 class Sensor2Storage(PostgresStorage[Sensor2]):
@@ -21,6 +23,17 @@ class Sensor2Storage(PostgresStorage[Sensor2]):
         stmt = (
             select(Sensor2)
             .where(Sensor2.screw_id == screw_id)
+            .order_by(Sensor2.timestamp.asc())
+        )
+        res = await self._db.execute(stmt)
+        return list(res.scalars().all())
+
+    async def list_by_rail(self, rail_id: int) -> list[Sensor2]:
+        j = join(Sensor2, Screw, Sensor2.screw_id == Screw.screw_id)
+        stmt = (
+            select(Sensor2)
+            .select_from(j)
+            .where(Screw.rail_id == rail_id)
             .order_by(Sensor2.timestamp.asc())
         )
         res = await self._db.execute(stmt)

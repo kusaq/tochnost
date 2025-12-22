@@ -1,5 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
+from typing import Any
 
 
 class RailRead(BaseModel):
@@ -31,3 +32,11 @@ class RailUpdate(BaseModel):
 class RailsListResponse(BaseModel):
     items: list[RailRead] = Field(description="Список рельс")
     total: int = Field(ge=0, description="Общее количество записей")
+
+
+class RailMetricRead(BaseModel):
+    name: str = Field(description="Название метрики")
+    value: float | None = Field(default=None, description="Агрегированное значение или пусто")
+    required: str | None = Field(default=None, description="Требуемое значение (если есть), например 'min..max [unit]'")
+    values: list[Any] = Field(default_factory=list, description="Список значений с датчиков")
+    note: str | None = Field(default=None, description="Примечание")

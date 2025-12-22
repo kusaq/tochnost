@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query
 
 from api.v1.base.dependencies import PaginationDep
 from api.v1.rail.dependencies import RailServiceDep
-from api.v1.rail.schemas import RailsListResponse, RailUpdate, RailRead
+from api.v1.rail.schemas import RailsListResponse, RailUpdate, RailRead, RailMetricRead
 from api.v1.auth.dependencies import CurrentUserDep
 
 
@@ -89,3 +89,17 @@ async def delete_rail(
 ):
     await service.delete_rail(rail_id)
     return {"deleted": 1}
+
+
+@router.get(
+    "/{rail_id}/metrics",
+    response_model=list[RailMetricRead],
+    summary="Агрегированные показания по рельсе",
+    description="Возвращает список метрик: название, агрегированное значение (или пусто), требуемое значение (если есть), список исходных значений, примечание.",
+)
+async def get_rail_metrics(
+    rail_id: int,
+    service: RailServiceDep,
+    user: CurrentUserDep,
+):
+    return await service.get_aggregated_metrics(rail_id)
