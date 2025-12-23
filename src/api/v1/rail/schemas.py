@@ -37,7 +37,7 @@ class RailsListResponse(BaseModel):
 class RailMetricRead(BaseModel):
     rail_id: int = Field(description="Идентификатор рельсы")
     name: str = Field(description="Название метрики")
-    value: float = Field(description="Агрегированное значение или последнее фактическое")
+    value: float | None = Field(default=None, description="Агрегированное значение или последнее фактическое")
     required: str | None = Field(default=None, description="Требуемое значение (если есть), например 'min..max [unit]'")
     values: list[tuple[datetime, Any]] = Field(
         default_factory=list,
