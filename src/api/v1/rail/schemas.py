@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
-from typing import Any
+from typing import Any, Literal
 
 
 class RailRead(BaseModel):
@@ -44,3 +44,24 @@ class RailMetricRead(BaseModel):
         description="Список значений с датчиков в формате [timestamp, value]",
     )
     note: str | None = Field(default=None, description="Примечание")
+
+
+class SensorSeriesRequest(BaseModel):
+    rail_ids: list[int] = Field(description="Список идентификаторов рельс")
+    source: Literal["sensor1", "sensor2"] = Field(
+        default="sensor1",
+        description="Источник данных: sensor1 или sensor2",
+    )
+    fields: list[str] = Field(
+        description="Список полей (имен колонок в БД / атрибутов модели Sensor1/Sensor2), которые включить в ответ",
+    )
+
+
+class SensorPoint(BaseModel):
+    timestamp: datetime = Field(description="Метка времени измерения")
+    values: dict[str, Any] = Field(description="Значения выбранных полей для данного timestamp")
+
+
+class RailSensorSeries(BaseModel):
+    rail_id: int = Field(description="Идентификатор рельсы")
+    points: list[SensorPoint] = Field(default_factory=list, description="Список точек по времени")

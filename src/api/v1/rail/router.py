@@ -6,7 +6,14 @@ from fastapi.responses import StreamingResponse
 
 from api.v1.base.dependencies import PaginationDep
 from api.v1.rail.dependencies import RailServiceDep
-from api.v1.rail.schemas import RailsListResponse, RailUpdate, RailRead, RailMetricRead
+from api.v1.rail.schemas import (
+    RailsListResponse,
+    RailUpdate,
+    RailRead,
+    RailMetricRead,
+    SensorSeriesRequest,
+    RailSensorSeries,
+)
 from api.v1.auth.dependencies import CurrentUserDep
 
 
@@ -124,3 +131,20 @@ async def export_rail_excel(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post(
+    "/sensors/query",
+    response_model=list[RailSensorSeries],
+    summary="Сырые данные датчиков по рельсам",
+    description=(
+        "Принимает список рельс и полей, возвращает по каждой рельсе список точек во времени: "
+        "{ rail_id, points: [ { timestamp, values{поле: значение} } ] }."
+    ),
+)
+async def get_sensor_series(
+    payload: SensorSeriesRequest,
+    service: RailServiceDep,
+    user: CurrentUserDep,
+):
+    return await service.get_sensor_series(payload)

@@ -7,7 +7,15 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import PatternFill
 
 from api.v1.base.service import BaseService
-from api.v1.rail.schemas import RailsListResponse, RailUpdate, RailRead, RailMetricRead
+from api.v1.rail.schemas import (
+    RailsListResponse,
+    RailUpdate,
+    RailRead,
+    RailMetricRead,
+    SensorSeriesRequest,
+    RailSensorSeries,
+    SensorPoint,
+)
 from infra.timescale_db.models import ScrewStatus
 
 
@@ -525,6 +533,32 @@ class RailService(BaseService):
         wb.save(buf)
         buf.seek(0)
         return buf.getvalue()
+
+    async def get_sensor_series(self, payload: SensorSeriesRequest) -> list[RailSensorSeries]:
+        """
+        Возвращает по каждой рельсе список точек:
+        { rail_id, points: [ { timestamp, values{field: value} } ] }
+        """
+        result: list[RailSensorSeries] = []
+
+        for rail_id in payload.rail_ids:
+            if payload.source == "sensor1":
+                rows = await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=100000, offset=0)
+            else:
+                rows = await self.uow.sensor2.list_by_rail(rail_id=rail_id)
+
+            points: list[SensorPoint] = []
+            for row in rows:
+                values: dict[str, object] = {}
+                for field in payload.fields:
+                    if hasattr(row, field):
+                        values[field] = getattr(row, field)
+                if values:
+                    points.append(SensorPoint(timestamp=row.timestamp, values=values))
+
+            result.append(RailSensorSeries(rail_id=rail_id, points=points))
+
+        return result
 
 
 async def _async_iter(seq):
