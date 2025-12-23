@@ -117,14 +117,18 @@ async def get_rail_metrics(
 @router.get(
     "/{rail_id}/export",
     summary="Выгрузка данных рельсы в Excel",
-    description="Формирует и возвращает Excel-файл с агрегированными данными по рельсе.",
+    description="Формирует и возвращает Excel-файл с агрегированными данными по рельсе. Можно указать конкретные метрики через query параметр metrics.",
 )
 async def export_rail_excel(
     rail_id: int,
     service: RailServiceDep,
     user: CurrentUserDep,
+    metrics: list[str] | None = Query(
+        default=None,
+        description="Список названий метрик для экспорта. Если не указан, экспортируются все метрики.",
+    ),
 ):
-    content = await service.export_metrics_excel(rail_id)
+    content = await service.export_metrics_excel(rail_id, metric_names=metrics)
     filename = f"rail_{rail_id}_metrics.xlsx"
     return StreamingResponse(
         io.BytesIO(content),

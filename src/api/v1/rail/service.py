@@ -382,12 +382,16 @@ class RailService(BaseService):
 
         return items
 
-    async def export_metrics_excel(self, rail_id: int) -> bytes:
+    async def export_metrics_excel(self, rail_id: int, metric_names: list[str] | None = None) -> bytes:
         """
         Формирует Excel-файл с агрегированными метриками по рельсе.
         Лист "Метрики": общая информация по рельсе + сводная таблица метрик.
         Отдельный лист на каждую метрику со списком исходных значений (timestamp, value),
         с подсветкой по threshold (если задан).
+        
+        Args:
+            rail_id: Идентификатор рельсы
+            metric_names: Список названий метрик для экспорта. Если None, экспортируются все метрики.
         """
         # Информация о рельсе
         rail = await self.uow.rail.get_by_id(rail_id)
@@ -423,6 +427,11 @@ class RailService(BaseService):
         }
 
         metrics = await self.get_aggregated_metrics(rail_id)
+        
+        # Фильтруем метрики, если указан список
+        if metric_names is not None:
+            metric_names_set = set(metric_names)
+            metrics = [m for m in metrics if m.name in metric_names_set]
 
         wb = Workbook()
         ws = wb.active
