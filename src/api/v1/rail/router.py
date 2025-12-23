@@ -1,6 +1,8 @@
 from typing import Literal
+import io
 
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 
 from api.v1.base.dependencies import PaginationDep
 from api.v1.rail.dependencies import RailServiceDep
@@ -103,3 +105,22 @@ async def get_rail_metrics(
     user: CurrentUserDep,
 ):
     return await service.get_aggregated_metrics(rail_id)
+
+
+@router.get(
+    "/{rail_id}/export",
+    summary="Выгрузка данных рельсы в Excel",
+    description="Формирует и возвращает Excel-файл с агрегированными данными по рельсе.",
+)
+async def export_rail_excel(
+    rail_id: int,
+    service: RailServiceDep,
+    user: CurrentUserDep,
+):
+    content = await service.export_metrics_excel(rail_id)
+    filename = f"rail_{rail_id}_metrics.xlsx"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

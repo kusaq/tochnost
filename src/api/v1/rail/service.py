@@ -1,9 +1,14 @@
 from datetime import datetime
+import io
 
 from fastapi import HTTPException, status
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import PatternFill
 
 from api.v1.base.service import BaseService
 from api.v1.rail.schemas import RailsListResponse, RailUpdate, RailRead, RailMetricRead
+from infra.timescale_db.models import ScrewStatus
 
 
 class RailService(BaseService):
@@ -368,6 +373,158 @@ class RailService(BaseService):
             )
 
         return items
+
+    async def export_metrics_excel(self, rail_id: int) -> bytes:
+        """
+        Формирует Excel-файл с агрегированными метриками по рельсе.
+        Лист "Метрики": общая информация по рельсе + сводная таблица метрик.
+        Отдельный лист на каждую метрику со списком исходных значений (timestamp, value),
+        с подсветкой по threshold (если задан).
+        """
+        # Информация о рельсе
+        rail = await self.uow.rail.get_by_id(rail_id)
+        if rail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+
+        screws = await self.uow.screw.list_by_rail(rail_id)
+        tightened_count = sum(1 for s in screws if s.status == ScrewStatus.COMPLETED)
+
+        # Пороговые значения
+        thresholds_list = await self.uow.threshold.list_all()
+        thresholds = {t.value: t async for t in _async_iter(thresholds_list)}
+
+        # Карта: отображаемое имя метрики -> ключ threshold
+        name_to_threshold_key: dict[str, str] = {
+            "mmBoltHeightLeftInner": "mm_bolt_height_left_inner",
+            "mmBoltHeightLeftOuter": "mm_bolt_height_left_outer",
+            "mmBoltHeightRightInner": "mm_bolt_height_right_inner",
+            "mmBoltHeightRightOuter": "mm_bolt_height_right_outer",
+            "mmGauge": "mm_gauge",
+            "mmSideWearLeft": "mm_side_wear_left",
+            "mmSideWearRight": "mm_side_wear_right",
+            "mmVerticalWearLeft": "mm_vertical_wear_left",
+            "mmVerticalWearRight": "mm_vertical_wear_right",
+            "radRailTiltLeft": "rad_rail_tilt_left",
+            "radRailTiltRight": "rad_rail_tilt_right",
+            "temperature": "temperature",
+            "humidity": "humidity",
+            "Момент ПЧ1": "frequency_torque",
+            "Момент ПЧ2": "frequency_torque",
+            "Момент ПЧ3": "frequency_torque",
+            "Момент ПЧ4": "frequency_torque",
+        }
+
+        metrics = await self.get_aggregated_metrics(rail_id)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Метрики"
+
+        # Общая информация о рельсе
+        info_rows = [
+            ("Rail ID", rail.rail_id),
+            ("Название", rail.name or ""),
+            ("Статус", rail.status.value if getattr(rail, "status", None) is not None else ""),
+            ("Сторона", rail.side.value if getattr(rail, "side", None) is not None else ""),
+            ("Объект", rail.object_name or ""),
+            ("Тип крепления", rail.fastening_type or ""),
+            ("Шпал", rail.sleepers if rail.sleepers is not None else ""),
+            ("Дата начала", rail.start_time),
+            ("Дата окончания", rail.end_time),
+            ("Всего закрученных гаек", tightened_count),
+        ]
+        for label, value in info_rows:
+            ws.append([label, value])
+
+        # Пустая строка перед сводной таблицей
+        ws.append([])
+
+        # Заголовок сводной таблицы
+        headers = ["Название метрики", "Значение", "Требуемое значение", "Количество измерений"]
+        ws.append(headers)
+
+        # Данные сводной таблицы
+        for m in metrics:
+            ws.append(
+                [
+                    m.name,
+                    m.value,
+                    m.required or "",
+                    len(m.values),
+                ]
+            )
+
+        # Простое авто-расширение колонок на листе "Метрики"
+        max_cols = ws.max_column
+        for col_idx in range(1, max_cols + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = 0
+            for cell in ws[col_letter]:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[col_letter].width = max_len + 2
+
+        # Отдельный лист для каждого списка значений
+        used_titles: set[str] = {"Метрики"}
+        for m in metrics:
+            base_title = m.name[:25] if len(m.name) > 25 else m.name
+            title = base_title or "Metric"
+            suffix = 1
+            while title in used_titles:
+                suffix += 1
+                # чтобы не превысить лимит Excel в 31 символ
+                trimmed = base_title[: (31 - len(str(suffix)) - 1)]
+                title = f"{trimmed}_{suffix}"
+            used_titles.add(title)
+
+            ws_metric = wb.create_sheet(title=title)
+
+            th = thresholds.get(name_to_threshold_key.get(m.name, ""))
+            if th:
+                ws_metric.append(["threshold_min", th.min_value])
+                ws_metric.append(["threshold_max", th.max_value])
+                ws_metric.append([])  # пустая строка
+
+            ws_metric.append(["timestamp", "value"])
+
+            # Цвета заливки
+            fill_ok = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")   # нежно-зелёный
+            fill_bad = PatternFill(start_color="FDECEA", end_color="FDECEA", fill_type="solid")  # нежно-красный
+
+            first_value_row = ws_metric.max_row + 1
+            for ts, val in m.values:
+                ws_metric.append([ts, val])
+
+            # Подсветка по threshold (если есть)
+            if th:
+                min_v = th.min_value
+                max_v = th.max_value
+                for row_idx in range(first_value_row, ws_metric.max_row + 1):
+                    cell = ws_metric.cell(row=row_idx, column=2)  # value
+                    try:
+                        v = float(cell.value)
+                    except (TypeError, ValueError):
+                        continue
+                    if v < min_v or v > max_v:
+                        fill = fill_bad
+                    else:
+                        fill = fill_ok
+                    ws_metric.cell(row=row_idx, column=1).fill = fill
+                    ws_metric.cell(row=row_idx, column=2).fill = fill
+
+            # Авто-ширина колонок на листе метрики
+            for col_idx in range(1, ws_metric.max_column + 1):
+                col_letter = get_column_letter(col_idx)
+                max_len = 0
+                for cell in ws_metric[col_letter]:
+                    if cell.value is not None:
+                        max_len = max(max_len, len(str(cell.value)))
+                ws_metric.column_dimensions[col_letter].width = max_len + 2
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
 
 
 async def _async_iter(seq):
