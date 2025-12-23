@@ -99,6 +99,7 @@ class Sensor1Values(BaseModel):
 
 class Sensor1Create(BaseModel):
     timestamp: datetime = Field(description="метка времени измерения")
+    sensor_id: int = Field(description="Порядковый номер датчика (1 или 2)")
     values: Sensor1Values = Field(description="Значения")
 
     @field_validator("timestamp", mode="before")

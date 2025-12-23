@@ -3,6 +3,9 @@ import math
 import json
 import asyncio
 
+from fastapi import HTTPException
+from starlette import status
+
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
@@ -94,6 +97,7 @@ class SensorService(BaseService):
         vright_ok: bool,
         screws_completed: int,
         resistance: float,
+        resistance_avg: float,
         resistance_ok: bool,
         gauge: float,
         gauge_ok: bool,
@@ -115,6 +119,7 @@ class SensorService(BaseService):
                     "mm_vertical_wear_right_ok": vright_ok,
                     "screws_completed": screws_completed,
                     "resistance": resistance,
+                    "resistance_avg": resistance_avg,
                     "resistance_ok": resistance_ok,
                     "mm_gauge": gauge,
                     "mm_gauge_ok": gauge_ok,
@@ -184,32 +189,22 @@ class SensorService(BaseService):
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
 
         active = self.state.get_active_rail()
-        is_closed_rail = False
         
         if not active:
-            # Если нет активной рельсы, берём последнюю закрытую
-            last_closed = self.state.last_closed()
-            if last_closed:
-                # Создаём временный RailSession для работы с закрытой рельсой
-                active = last_closed
-                is_closed_rail = True
-            else:
-                await self._publish_stages_empty()
-                return
+            return
         
         # Обновляем resistance только для активной рельсы
-        if not is_closed_rail:
-            self.state.update_resistance(float(sensor2_data.values.resistance))
+        self.state.update_resistance(float(sensor2_data.values.resistance))
 
-            res_threshold = await self.get_threshold("resistance")
-            if res_threshold:
-                await self._track_bad_range(
-                    metric_key="resistance",
-                    res_threshold=res_threshold,
-                    res_value=sensor2_data.values.resistance,
-                    current_mm=active.last_mm_along_rail if active else 0,
-                    active=active,
-                )
+        res_threshold = await self.get_threshold("resistance")
+        if res_threshold:
+            await self._track_bad_range(
+                metric_key="resistance",
+                res_threshold=res_threshold,
+                res_value=sensor2_data.values.resistance,
+                current_mm=active.last_mm_along_rail if active else 0,
+                active=active,
+            )
 
         if sensor2_data.values.all_frequency_status_zero():
             if self.state.has_screw_session:
@@ -242,7 +237,7 @@ class SensorService(BaseService):
                     await self.uow.error.add_many(errors_to_add)
                     for err in errors_to_add:
                         await self._publish_error(
-            timestamp=sensor2_data.timestamp,
+                            timestamp=sensor2_data.timestamp,
                             description=err.description,
                             value_name=err.value_name,
                             value=err.value,
@@ -280,6 +275,13 @@ class SensorService(BaseService):
         return screw.screw_id
 
     async def add_sensor1_data(self, data: Sensor1Create) -> None:
+        if data.sensor_id == 1:
+            await self.process_first_sensor1_data(data)
+        elif data.sensor_id == 2:
+            await self.process_second_sensor1_data(data)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+
+    async def process_first_sensor1_data(self, data: Sensor1Create) -> None:
         rail_id = self.state.is_in_closed(data.timestamp)
         if rail_id is not None:
             await self.uow.sensor1.add(
@@ -288,126 +290,92 @@ class SensorService(BaseService):
             return
 
         active = self.state.get_active_rail()
-        if active:
-            if data.timestamp < active.start_time:
-                return
 
-            if data.values.mm_along_rail >= active.last_mm_along_rail:
-                # Копим статистику по лазерам для определения стороны рельсы
-                self.state.record_laser_flags(
-                    left_on_rail=bool(data.values.laser_on_rail_left),
-                    right_on_rail=bool(data.values.laser_on_rail_right),
-                )
-                # Отслеживание диапазонов для метрик Sensor1 на текущем мм
-                current_mm = data.values.mm_along_rail
-                for key in self.S1_RANGE_KEYS:
-                    th = await self.get_threshold(key)
-                    if th is None:
-                        continue
-                    value = getattr(data.values, key)
-                    await self._track_bad_range(
-                        metric_key=key,
-                        res_threshold=th,
-                        res_value=float(value),
-                        current_mm=current_mm,
-                        active=active,
-                    )
-                self.state.update_active_progress(data.values.mm_along_rail, data.timestamp)
-                self.state.update_gauge(float(data.values.mm_gauge))
-                await self.uow.sensor1.add(
-                    Sensor1(
-                        rail_id=active.rail_id,
-                        timestamp=data.timestamp,
-                        **data.values.model_dump(),
-                    )
-                )
-                th_left = await self.get_threshold("mm_side_wear_left")
-                th_right = await self.get_threshold("mm_side_wear_right")
-                th_vleft = await self.get_threshold("mm_vertical_wear_left")
-                th_vright = await self.get_threshold("mm_vertical_wear_right")
-                th_res = await self.get_threshold("resistance")
-                th_gauge = await self.get_threshold("mm_gauge")
-                left_val = data.values.mm_side_wear_left
-                right_val = data.values.mm_side_wear_right
-                vleft_val = data.values.mm_vertical_wear_left
-                vright_val = data.values.mm_vertical_wear_right
-                left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
-                right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
-                vleft_ok = True if th_vleft is None else (th_vleft.min_value <= vleft_val <= th_vleft.max_value)
-                vright_ok = True if th_vright is None else (th_vright.min_value <= vright_val <= th_vright.max_value)
-                res_cur = self.state.get_resistance_current()
-                res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
-                gauge_cur = data.values.mm_gauge
-                gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
-                errors_count = await self.uow.error.count_by_rail(active.rail_id)
-                screws_completed = self.state.get_total_screws()
-                mm_gauge_avg = self.state.get_gauge_average()
-                await self._publish_stages(
-                    errors_count=errors_count,
-                    current_mm=current_mm,
-                    left_val=left_val,
-                    left_ok=left_ok,
-                    right_val=right_val,
-                    right_ok=right_ok,
-                    vleft_val=vleft_val,
-                    vleft_ok=vleft_ok,
-                    vright_val=vright_val,
-                    vright_ok=vright_ok,
-                    screws_completed=screws_completed,
-                    resistance=res_cur,
-                    resistance_ok=res_ok,
-                    gauge=gauge_cur,
-                    gauge_ok=gauge_ok,
-                    gauge_avg=mm_gauge_avg,
-                )
-            elif data.values.mm_along_rail == 0:
-                await self.close_active_rail()
-            else:
-                # Если произошёл откат более чем на 5% текущего прогресса — закрываем рельсу и открываем новую
-                last_mm = max(1, int(active.last_mm_along_rail))
-                curr_mm = int(data.values.mm_along_rail)
-                if curr_mm < active.last_mm_along_rail:
-                    decrease_ratio = (last_mm - curr_mm) / float(last_mm)
-                    if decrease_ratio > 0.05:
-                        await self.close_active_rail()
-                        await self.bind_active_rail(data)
-                    else:
-                        # Меньше 5% — сохраняем измерение, но фиксируем сбой датчика
-                        await self.uow.sensor1.add(
-                            Sensor1(
-                                rail_id=active.rail_id,
-                                timestamp=data.timestamp,
-                                **data.values.model_dump(),
-                            )
-                        )
-                        delta_mm = float(last_mm - curr_mm)
-                        description = f"Сбой датчика расстояния: откат {delta_mm:.0f} мм ({decrease_ratio * 100:.2f}%)"
-                        await self.uow.error.add(
-                            Error(
-                                rail_id=active.rail_id,
-                                screw_id=None,
-                                value_name="mm_along_rail_backtrack",
-                                description=description,
-                                unit_of_measurement="мм",
-                                value=delta_mm,
-                                min_value=0.0,
-                                max_value=0.0,
-                                is_critical=False,
-                            )
-                        )
-                        await self._publish_error(
-                            timestamp=data.timestamp,
-                            description=description,
-                            value_name="mm_along_rail_backtrack",
-                            value=delta_mm,
-                        )
+        if active is None:
+            if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
+                return
+            await self.bind_active_rail(data)
             return
 
-        if data.values.mm_along_rail > 0:
-            await self.bind_active_rail(data)
-        else:
-            await self._publish_stages_empty()
+        if data.timestamp < active.start_time:
+            return
+
+        if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
+            await self.close_active_rail()
+            return
+
+        self.state.record_laser_flags(
+            left_on_rail=data.values.laser_on_rail_left,
+            right_on_rail=data.values.laser_on_rail_right,
+        )
+        # Отслеживание диапазонов для метрик Sensor1 на текущем мм
+        current_mm = data.values.mm_along_rail
+        for key in self.S1_RANGE_KEYS:
+            th = await self.get_threshold(key)
+            if th is None:
+                continue
+            value = getattr(data.values, key)
+            await self._track_bad_range(
+                metric_key=key,
+                res_threshold=th,
+                res_value=float(value),
+                current_mm=current_mm,
+                active=active,
+            )
+        self.state.update_active_progress(data.values.mm_along_rail, data.timestamp)
+        self.state.update_gauge(float(data.values.mm_gauge))
+        await self.uow.sensor1.add(
+            Sensor1(
+                rail_id=active.rail_id,
+                timestamp=data.timestamp,
+                **data.values.model_dump(),
+            )
+        )
+        th_left = await self.get_threshold("mm_side_wear_left")
+        th_right = await self.get_threshold("mm_side_wear_right")
+        th_vleft = await self.get_threshold("mm_vertical_wear_left")
+        th_vright = await self.get_threshold("mm_vertical_wear_right")
+        th_res = await self.get_threshold("resistance")
+        th_gauge = await self.get_threshold("mm_gauge")
+        left_val = data.values.mm_side_wear_left
+        right_val = data.values.mm_side_wear_right
+        vleft_val = data.values.mm_vertical_wear_left
+        vright_val = data.values.mm_vertical_wear_right
+        left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
+        right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
+        vleft_ok = True if th_vleft is None else (th_vleft.min_value <= vleft_val <= th_vleft.max_value)
+        vright_ok = True if th_vright is None else (th_vright.min_value <= vright_val <= th_vright.max_value)
+        res_cur = self.state.get_resistance_current()
+        res_avg = self.state.get_resistance_average()
+        res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
+        gauge_cur = data.values.mm_gauge
+        gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
+        errors_count = await self.uow.error.count_by_rail(active.rail_id)
+        screws_completed = self.state.get_total_screws()
+        mm_gauge_avg = self.state.get_gauge_average()
+        await self._publish_stages(
+            errors_count=errors_count,
+            current_mm=current_mm,
+            left_val=left_val,
+            left_ok=left_ok,
+            right_val=right_val,
+            right_ok=right_ok,
+            vleft_val=vleft_val,
+            vleft_ok=vleft_ok,
+            vright_val=vright_val,
+            vright_ok=vright_ok,
+            screws_completed=screws_completed,
+            resistance=res_cur,
+            resistance_avg=res_avg,
+            resistance_ok=res_ok,
+            gauge=gauge_cur,
+            gauge_ok=gauge_ok,
+            gauge_avg=mm_gauge_avg,
+        )
         return
+
+    async def process_second_sensor1_data(self, data: Sensor1Create) -> None:
+        ...
 
     async def close_active_rail(self) -> None:
         active = self.state.get_active_rail()
