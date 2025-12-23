@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import HTTPException, status
 
 from api.v1.base.service import BaseService
@@ -61,12 +63,48 @@ class RailService(BaseService):
                         pass
             return vals
 
+        def collect_s1_with_ts(key: str) -> list[tuple[datetime, float]]:
+            vals: list[tuple[datetime, float]] = []
+            for s in s1_list:
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        vals.append((s.timestamp, float(v)))
+                    except Exception:
+                        pass
+            return vals
+
+        def latest_s1(key: str) -> tuple[float | None, "datetime | None"]:
+            for s in reversed(s1_list):
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        return float(v), s.timestamp
+                    except Exception:
+                        continue
+            return None, None
+
         def collect_s1_bool(key: str) -> list[bool]:
             vals: list[bool] = []
             for s in s1_list:
                 v = getattr(s, key, None)
                 if v is not None:
                     vals.append(bool(v))
+            return vals
+
+        def latest_s1_bool(key: str) -> tuple[bool | None, datetime | None]:
+            for s in reversed(s1_list):
+                v = getattr(s, key, None)
+                if v is not None:
+                    return bool(v), s.timestamp
+            return None, None
+
+        def collect_s1_bool_with_ts(key: str) -> list[tuple[datetime, bool]]:
+            vals: list[tuple[datetime, bool]] = []
+            for s in s1_list:
+                v = getattr(s, key, None)
+                if v is not None:
+                    vals.append((s.timestamp, bool(v)))
             return vals
 
         def collect_s2(key: str) -> list[float]:
@@ -80,6 +118,27 @@ class RailService(BaseService):
                         pass
             return vals
 
+        def collect_s2_with_ts(key: str) -> list[tuple[datetime, float]]:
+            vals: list[tuple[datetime, float]] = []
+            for s in s2_list:
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        vals.append((s.timestamp, float(v)))
+                    except Exception:
+                        pass
+            return vals
+
+        def latest_s2(key: str) -> tuple[float | None, "datetime | None"]:
+            for s in reversed(s2_list):
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        return float(v), s.timestamp
+                    except Exception:
+                        continue
+            return None, None
+
         def collect_s2_int(key: str) -> list[int]:
             vals: list[int] = []
             for s in s2_list:
@@ -90,6 +149,27 @@ class RailService(BaseService):
                     except Exception:
                         pass
             return vals
+
+        def collect_s2_int_with_ts(key: str) -> list[tuple[datetime, int]]:
+            vals: list[tuple[datetime, int]] = []
+            for s in s2_list:
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        vals.append((s.timestamp, int(v)))
+                    except Exception:
+                        pass
+            return vals
+
+        def latest_s2_int(key: str) -> tuple[int | None, "datetime | None"]:
+            for s in reversed(s2_list):
+                v = getattr(s, key, None)
+                if v is not None:
+                    try:
+                        return int(v), s.timestamp
+                    except Exception:
+                        continue
+            return None, None
 
         def avg(vals: list[float]) -> float | None:
             return (sum(vals) / len(vals)) if vals else None
@@ -117,7 +197,18 @@ class RailService(BaseService):
             ("encoder4", "encoder4"),
         ]
         for disp, key in empty_keys:
-            items.append(RailMetricRead(name=disp, value=None, required=None, values=collect_s1(key), note=None))
+            vals = collect_s1(key)
+            latest_value, latest_ts = latest_s1(key)
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=latest_value,
+                    required=None,
+                    values=collect_s1_with_ts(key),
+                    note=None,
+                )
+            )
 
         laser_keys = [
             ("laserOnRailLeft", "laser_on_rail_left"),
@@ -126,7 +217,23 @@ class RailService(BaseService):
             ("laserOnTieRight", "laser_on_tie_right"),
         ]
         for disp, key in laser_keys:
-            items.append(RailMetricRead(name=disp, value=None, required=None, values=collect_s1_bool(key), note=None))
+            latest_value, latest_ts = latest_s1_bool(key)
+            # Для совместимости value остаётся числом (0/1) либо None
+            num_value: float | None
+            if latest_value is None:
+                num_value = None
+            else:
+                num_value = 1.0 if latest_value else 0.0
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=num_value,
+                    required=None,
+                    values=collect_s1_bool_with_ts(key),
+                    note=None,
+                )
+            )
 
         s2_status_keys = [
             ("Состояние ПЧ1", "frequency_status_1"),
@@ -135,11 +242,39 @@ class RailService(BaseService):
             ("Состояние ПЧ4", "frequency_status_4"),
         ]
         for disp, key in s2_status_keys:
-            items.append(RailMetricRead(name=disp, value=None, required=None, values=collect_s2_int(key), note=None))
+            latest_value, latest_ts = latest_s2_int(key)
+            num_value: float | None = float(latest_value) if latest_value is not None else None
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=num_value,
+                    required=None,
+                    values=collect_s2_int_with_ts(key),
+                    note=None,
+                )
+            )
 
         # 2) Максимум
         mm_along_vals = collect_s1("mm_along_rail")
-        items.append(RailMetricRead(name="mmAlongRail", value=max_val(mm_along_vals), required=None, values=mm_along_vals, note=None))
+        max_mm = max_val(mm_along_vals)
+        if max_mm is not None:
+            # ищем timestamp первого вхождения максимума с конца (последнее измерение с макс. значением)
+            for s in reversed(s1_list):
+                v = getattr(s, "mm_along_rail", None)
+                if v is not None and float(v) == float(max_mm):
+                    # timestamp можно использовать в будущем, но сейчас не включаем в схему
+                    break
+        items.append(
+            RailMetricRead(
+                rail_id=rail_id,
+                name="mmAlongRail",
+                value=max_mm,
+                required=None,
+                values=collect_s1_with_ts("mm_along_rail"),
+                note=None,
+            )
+        )
 
         # 3) Среднее
         avg_map = [
@@ -157,26 +292,39 @@ class RailService(BaseService):
         ]
         for disp, key, th_key in avg_map:
             vals = collect_s1(key)
-            items.append(RailMetricRead(name=disp, value=avg(vals), required=required_for(th_key), values=vals, note=None))
+            avg_val = avg(vals)
+            latest_value, latest_ts = latest_s1(key)
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=avg_val,
+                    required=required_for(th_key),
+                    values=collect_s1_with_ts(key),
+                    note=None,
+                )
+            )
 
         # Средние по Sensor2: температура и влажность
         temp_vals = collect_s2("temperature")
         items.append(
             RailMetricRead(
+                rail_id=rail_id,
                 name="temperature",
                 value=avg(temp_vals),
                 required=required_for("temperature"),
-                values=temp_vals,
+                values=collect_s2_with_ts("temperature"),
                 note=None,
             )
         )
         hum_vals = collect_s2("humidity")
         items.append(
             RailMetricRead(
+                rail_id=rail_id,
                 name="humidity",
                 value=avg(hum_vals),
                 required=required_for("humidity"),
-                values=hum_vals,
+                values=collect_s2_with_ts("humidity"),
                 note=None,
             )
         )
@@ -189,7 +337,16 @@ class RailService(BaseService):
         ]
         for disp, key in torque_keys:
             vals = collect_s2(key)
-            items.append(RailMetricRead(name=disp, value=avg(vals), required=required_for("frequency_torque"), values=vals, note=None))
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=avg(vals),
+                    required=required_for("frequency_torque"),
+                    values=collect_s2_with_ts(key),
+                    note=None,
+                )
+            )
 
         conv_freq_keys = [
             ("Частота ПЧ1", "converter_frequency_1"),
@@ -199,7 +356,16 @@ class RailService(BaseService):
         ]
         for disp, key in conv_freq_keys:
             vals = collect_s2(key)
-            items.append(RailMetricRead(name=disp, value=avg(vals), required=None, values=vals, note=None))
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=avg(vals),
+                    required=None,
+                    values=collect_s2_with_ts(key),
+                    note=None,
+                )
+            )
 
         return items
 
