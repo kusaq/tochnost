@@ -318,7 +318,7 @@ class RailService(BaseService):
                 )
             )
 
-        # Средние по Sensor2: температура и влажность
+        # Средние по Sensor2: температура, влажность и сопротивление
         temp_vals = collect_s2("temperature")
         items.append(
             RailMetricRead(
@@ -338,6 +338,17 @@ class RailService(BaseService):
                 value=avg(hum_vals),
                 required=required_for("humidity"),
                 values=collect_s2_with_ts("humidity"),
+                note=None,
+            )
+        )
+        res_vals = collect_s2("resistance")
+        items.append(
+            RailMetricRead(
+                rail_id=rail_id,
+                name="resistance",
+                value=avg(res_vals),
+                required=required_for("resistance"),
+                values=collect_s2_with_ts("resistance"),
                 note=None,
             )
         )
@@ -420,6 +431,7 @@ class RailService(BaseService):
             "radRailTiltRight": "rad_rail_tilt_right",
             "temperature": "temperature",
             "humidity": "humidity",
+            "resistance": "resistance",
             "Момент ПЧ1": "frequency_torque",
             "Момент ПЧ2": "frequency_torque",
             "Момент ПЧ3": "frequency_torque",
