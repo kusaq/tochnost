@@ -18,8 +18,8 @@ class SensorState:
         self._total_screws: int = 0
         self._screw_session: Deque[ScrewDC] = deque()
         # high-throughput ingestion queues
-        self._sensor1_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
-        self._sensor2_queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
+        self._sensor1_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
+        self._sensor2_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
         # generic bad ranges by metric key: key -> (start_mm, start_value)
         self._bad_ranges: dict[str, tuple[int, float]] = {}
         # resistance stats

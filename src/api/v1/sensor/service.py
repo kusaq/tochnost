@@ -30,8 +30,8 @@ class SensorService(BaseService):
         "mm_side_wear_right": "Боковой износ правого рельса",
         "mm_vertical_wear_left": "Вертикальный износ левого рельса",
         "mm_vertical_wear_right": "Вертикальный износ правого рельса",
-        "rad_rail_tilt_left": "Подуклонка левого рельса",
-        "rad_rail_tilt_right": "Подуклонка правого рельса",
+        "rad_rail_tilt_left": "Наклон левого рельса",
+        "rad_rail_tilt_right": "Наклон правого рельса",
     }
 
     # Метрики Sensor1 для отслеживания диапазонов
@@ -128,6 +128,7 @@ class SensorService(BaseService):
                 ensure_ascii=False,
             ),
         )
+
     async def _track_bad_range(
         self,
         metric_key: str,
