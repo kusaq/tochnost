@@ -278,8 +278,10 @@ class SensorService(BaseService):
     async def add_sensor1_data(self, data: Sensor1Create) -> None:
         if data.sensor_id == 1:
             await self.process_first_sensor1_data(data)
-        elif data.sensor_id == 2:
+            return
+        if data.sensor_id == 2:
             await self.process_second_sensor1_data(data)
+            return
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
 
     async def process_first_sensor1_data(self, data: Sensor1Create) -> None:
