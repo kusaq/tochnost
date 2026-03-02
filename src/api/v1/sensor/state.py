@@ -204,6 +204,28 @@ class SensorState:
                 break
         return None
 
+    def reset(self, *, drain_queues: bool = True) -> None:
+        """
+        Полный сброс состояния. Используйте для восстановления после сбоев или тестов.
+        drain_queues: если True, очищает очереди S1/S2 (буферизованные данные теряются).
+        """
+        self.clear_active()
+        self._closed.clear()
+        self.clear_screw_session()
+        self.reset_total_screws()
+        self.reset_resistance_stats()
+        self.reset_gauge_stats()
+        self.reset_laser_counts()
+        self._bad_ranges.clear()
+        if drain_queues:
+            for q in (self._sensor1_queue, self._sensor2_queue):
+                while True:
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+
 
 SENSOR_STATE = SensorState()
 

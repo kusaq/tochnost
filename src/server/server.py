@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         log_to_file=False if settings.DEBUG else True,
     )
     # start background workers for sensor ingestion
-    _app.state.sensor_workers = await start_sensor_workers(s1_workers=1, s2_workers=1)
+    _app.state.sensor_workers = await start_sensor_workers()
     yield
     # stop background workers
     await stop_sensor_workers()

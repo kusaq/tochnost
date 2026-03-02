@@ -538,7 +538,7 @@ class SensorService(BaseService):
         return RailSide.LEFT if left > right else RailSide.RIGHT
 
 # ---- Queue workers for high-throughput ingestion ----
-async def _sensor1_worker(worker_id: int, state: SensorState) -> None:
+async def _sensor1_worker(state: SensorState) -> None:
     redis = RedisAPI()
     while True:
         item: Sensor1Create = await state.sensor1_queue().get()
@@ -552,7 +552,7 @@ async def _sensor1_worker(worker_id: int, state: SensorState) -> None:
             state.sensor1_queue().task_done()
 
 
-async def _sensor2_worker(worker_id: int, state: SensorState) -> None:
+async def _sensor2_worker(state: SensorState) -> None:
     redis = RedisAPI()
     while True:
         item: Sensor2Create = await state.sensor2_queue().get()
@@ -570,19 +570,17 @@ _workers_started = False
 _worker_tasks: list[asyncio.Task] = []
 
 
-async def start_sensor_workers(s1_workers: int = 1, s2_workers: int = 1) -> list[asyncio.Task]:
+async def start_sensor_workers() -> list[asyncio.Task]:
     global _workers_started, _worker_tasks
     if _workers_started:
         return _worker_tasks
-    tasks: list[asyncio.Task] = []
     state = SENSOR_STATE
-    for i in range(s1_workers):
-        tasks.append(asyncio.create_task(_sensor1_worker(i + 1, state)))
-    for i in range(s2_workers):
-        tasks.append(asyncio.create_task(_sensor2_worker(i + 1, state)))
-    _worker_tasks = tasks
+    _worker_tasks = [
+        asyncio.create_task(_sensor1_worker(state)),
+        asyncio.create_task(_sensor2_worker(state)),
+    ]
     _workers_started = True
-    return tasks
+    return _worker_tasks
 
 
 async def stop_sensor_workers() -> None:

@@ -165,6 +165,12 @@ class Sensor2Create(BaseModel):
         return dt
 
 
+class SensorStateResetRequest(BaseModel):
+    """Требуется явное подтверждение для сброса состояния."""
+
+    confirm: bool = Field(description="Должно быть True для выполнения сброса")
+
+
 class ThresholdEntry(BaseModel):
     min_value: float
     max_value: float
