@@ -185,6 +185,65 @@ class SensorService(BaseService):
         await self.redis.set(self.THRESHOLDS_CACHE_KEY, thresholds_model.model_dump_json(), expire=300)
         return thresholds_model
 
+    async def _add_sensor2_data_legacy_zero_check(
+        self, sensor2_data: Sensor2Create, active: RailSession
+    ) -> None:
+        """
+        DEPRECATED: Старый алгоритм — ждём all_frequency_status_zero, потом заканчиваем batch.
+        Оставлено для справки.
+        """
+        if sensor2_data.values.all_frequency_status_zero():
+            if self.state.has_screw_session:
+                errors_to_add: list[Error] = []
+                ft_threshold = await self.get_threshold("frequency_torque")
+                for idx, screw in enumerate(list(self.state.iter_screws()), start=1):
+                    if ft_threshold:
+                        ft_value = screw.frequency_torque
+                        if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
+                            side = "левой" if idx in (1, 2) else "правой"
+                            verdict = "недостаточно" if ft_value < ft_threshold.min_value else "излишне"
+                            description = f"Гайка №{screw.serial_id} по {side} стороне была {verdict} закручена"
+                            errors_to_add.append(
+                                Error(
+                                    rail_id=active.rail_id,
+                                    screw_id=screw.screw_id,
+                                    value_name="frequency_torque",
+                                    description=description,
+                                    unit_of_measurement=ft_threshold.unit_of_measurement,
+                                    value=ft_value,
+                                    min_value=ft_threshold.min_value,
+                                    max_value=ft_threshold.max_value,
+                                    is_critical=ft_threshold.is_critical,
+                                )
+                            )
+                    await self.uow.screw.update(screw_id=screw.screw_id, status=ScrewStatus.COMPLETED)
+                if errors_to_add:
+                    await self.uow.error.add_many(errors_to_add)
+                    for err in errors_to_add:
+                        await self._publish_error(
+                            timestamp=sensor2_data.timestamp,
+                            description=err.description,
+                            value_name=err.value_name,
+                            value=err.value,
+                        )
+                self.state.clear_screw_session()
+            return
+
+        sensors = []
+        for i in range(1, 5):
+            if self.state.screw_session_len < i:
+                screw_id = await self.add_screw(
+                    getattr(sensor2_data.values, f"frequency_torque_{i}"),
+                    sensor2_data.timestamp,
+                )
+            else:
+                screw_id = self.state.screw_session_item(i - 1).screw_id
+                self.state.update_screw_max_torque(i - 1, getattr(sensor2_data.values, f"frequency_torque_{i}"))
+            sensors.append(
+                Sensor2(timestamp=sensor2_data.timestamp, screw_id=screw_id, **sensor2_data.values.model_dump())
+            )
+        await self.uow.sensor2.add_many(sensors)
+
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
         await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
@@ -207,58 +266,54 @@ class SensorService(BaseService):
                 active=active,
             )
 
-        if sensor2_data.values.all_frequency_status_zero():
-            if self.state.has_screw_session:
-                errors_to_add: list[Error] = []
-                ft_threshold = await self.get_threshold("frequency_torque")
-                completed_batch: list[ScrewDC] = []
-                for idx, screw in enumerate(list(self.state.iter_screws()), start=1):
-                    if ft_threshold:
-                        ft_value = screw.frequency_torque
-                        if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
-                            side = "левой" if idx in (1, 2) else "правой"
-                            verdict = "недостаточно" if ft_value < ft_threshold.min_value else "излишне"
-                            description = f"Гайка №{screw.serial_id} по {side} стороне была {verdict} закручена"
-                            errors_to_add.append(
-                                Error(
-                                    rail_id=active.rail_id,
-                                    screw_id=screw.screw_id,
-                                    value_name="frequency_torque",
-                                    description=description,
-                                    unit_of_measurement=ft_threshold.unit_of_measurement,
-                                    value=ft_value,
-                                    min_value=ft_threshold.min_value,
-                                    max_value=ft_threshold.max_value,
-                                    is_critical=ft_threshold.is_critical,
-                                )
-                            )
-                    await self.uow.screw.update(screw_id=screw.screw_id, status=ScrewStatus.COMPLETED)
-                    completed_batch.append(screw)
-                if errors_to_add:
-                    await self.uow.error.add_many(errors_to_add)
-                    for err in errors_to_add:
-                        await self._publish_error(
-                            timestamp=sensor2_data.timestamp,
-                            description=err.description,
-                            value_name=err.value_name,
-                            value=err.value,
-                        )
-                self.state.clear_screw_session()
-            return
-
-        sensors = []
+        # Новый алгоритм: сразу создаём 4 гайки и проверяем на ошибки
+        # (проверка на нули не нужна — приходят ненулевые значения)
+        screws_created: list[ScrewDC] = []
         for i in range(1, 5):
-            if self.state.screw_session_len < i:
-                screw_id = await self.add_screw(
-                    getattr(sensor2_data.values, f"frequency_torque_{i}"),
-                    sensor2_data.timestamp,
+            ft_val = getattr(sensor2_data.values, f"frequency_torque_{i}")
+            await self.add_screw(ft_val, sensor2_data.timestamp)
+            screw_dc = self.state.screw_session_item(self.state.screw_session_len - 1)
+            screws_created.append(screw_dc)
+
+        errors_to_add: list[Error] = []
+        ft_threshold = await self.get_threshold("frequency_torque")
+        for idx, screw in enumerate(screws_created, start=1):
+            if ft_threshold:
+                ft_value = screw.frequency_torque
+                if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
+                    side = "левой" if idx in (1, 2) else "правой"
+                    verdict = "недостаточно" if ft_value < ft_threshold.min_value else "излишне"
+                    description = f"Гайка №{screw.serial_id} по {side} стороне была {verdict} закручена"
+                    errors_to_add.append(
+                        Error(
+                            rail_id=active.rail_id,
+                            screw_id=screw.screw_id,
+                            value_name="frequency_torque",
+                            description=description,
+                            unit_of_measurement=ft_threshold.unit_of_measurement,
+                            value=ft_value,
+                            min_value=ft_threshold.min_value,
+                            max_value=ft_threshold.max_value,
+                            is_critical=ft_threshold.is_critical,
+                        )
+                    )
+            await self.uow.screw.update(screw_id=screw.screw_id, status=ScrewStatus.COMPLETED)
+
+        if errors_to_add:
+            await self.uow.error.add_many(errors_to_add)
+            for err in errors_to_add:
+                await self._publish_error(
+                    timestamp=sensor2_data.timestamp,
+                    description=err.description,
+                    value_name=err.value_name,
+                    value=err.value,
                 )
-            else:
-                screw_id = self.state.screw_session_item(i-1).screw_id
-                self.state.update_screw_max_torque(i-1, getattr(sensor2_data.values, f"frequency_torque_{i}"))
-            sensors.append(
-                Sensor2(timestamp=sensor2_data.timestamp, screw_id=screw_id, **sensor2_data.values.model_dump())
-            )
+        self.state.clear_screw_session()
+
+        sensors = [
+            Sensor2(timestamp=sensor2_data.timestamp, screw_id=s.screw_id, **sensor2_data.values.model_dump())
+            for s in screws_created
+        ]
         await self.uow.sensor2.add_many(sensors)
 
     async def add_screw(self, frequency_torque: float, ts: datetime) -> int:
