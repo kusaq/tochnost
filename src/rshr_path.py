@@ -8,11 +8,10 @@ from pathlib import Path
 
 def bootstrap() -> None:
     here = Path(__file__).resolve()
-    candidates = [
-        here.parents[2] / "libs",
-        here.parents[1] / "libs",
-        Path("/app/libs"),
-    ]
+    candidates: list[Path] = []
+    for parent in here.parents:
+        candidates.append(parent / "libs")
+    candidates.append(Path("/app/libs"))
     for base in candidates:
         if (base / "rshr_core").is_dir():
             s = str(base)
