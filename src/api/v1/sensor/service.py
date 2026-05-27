@@ -1,7 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import heapq
+import logging
 import math
 import json
 import asyncio
+import itertools
 
 from fastapi import HTTPException
 from starlette import status
@@ -9,18 +12,30 @@ from starlette import status
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
-from api.v1.sensor.state import SensorState
+from api.v1.sensor.state import SensorState, MergedSensorEvent
 from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error, RailSide
 from infra.timescale_db.ts_db import get_unscoped_db
 from infra.redis.redis_api import RedisAPI
 from infra.timescale_db.uow import TimeScaleDBUnitOfWork
 from api.v1.sensor.state import SENSOR_STATE
+from api.v1.sensor.tightening import has_moment_activity, all_torque_zero, MOMENT_KEYS, FREQ_KEYS
+from rshr_core.config import RshrTimingConfig
+from rshr_core.rshr_length import segment_length_mm
+from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
+
+logger = logging.getLogger(__name__)
+TIMING_CONFIG = RshrTimingConfig.from_env()
+_event_counter = itertools.count()
 
 
 class SensorService(BaseService):
     state: SensorState
 
     THRESHOLDS_CACHE_KEY = "thresholds:all"
+
+    # Длина РШР по mmAlongRail (пост 1): норма ~25 м, допуск от 20 м, < 15 м — отброс
+    RSHR_LENGTH_MIN_OK_MM = 20_000
+    RSHR_LENGTH_DISCARD_BELOW_MM = 15_000
 
     # Человекочитаемые имена метрик
     METRIC_DISPLAY: dict[str, str] = {
@@ -160,7 +175,7 @@ class SensorService(BaseService):
                     )
                 )
                 await self._publish_error(
-                    timestamp=datetime.now(),
+                    timestamp=active.last_timestamp or datetime.utcnow(),
                     description=f"{self.METRIC_DISPLAY.get(metric_key, metric_key)} было неприемлемым с {start_mm} мм по {current_mm} мм",
                     value_name=metric_key,
                     value=start_value,
@@ -244,88 +259,145 @@ class SensorService(BaseService):
             )
         await self.uow.sensor2.add_many(sensors)
 
+    def _modbus_target_rail_id(self) -> int | None:
+        post2 = self.state.post2_tracker().rail_at_post2
+        if post2 is not None:
+            return post2
+        active = self.state.get_active_rail()
+        return active.rail_id if active else None
+
+    def _rail_session_for_modbus(self, rail_id: int) -> RailSession | None:
+        active = self.state.get_active_rail()
+        if active and active.rail_id == rail_id:
+            return active
+        return self.state.find_closed_rail(rail_id) or active
+
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
         await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
 
-        active = self.state.get_active_rail()
-        
-        if not active:
+        rail_id = self._modbus_target_rail_id()
+        if rail_id is None:
             return
-        
-        # Обновляем resistance только для активной рельсы
-        self.state.update_resistance(float(sensor2_data.values.resistance))
+        active = self._rail_session_for_modbus(rail_id)
+        if active is None:
+            return
+
+        values = sensor2_data.values
+        self.state.update_resistance(float(values.resistance))
+        self.state.update_temperature(float(values.temperature))
 
         res_threshold = await self.get_threshold("resistance")
         if res_threshold:
             await self._track_bad_range(
                 metric_key="resistance",
                 res_threshold=res_threshold,
-                res_value=sensor2_data.values.resistance,
-                current_mm=active.last_mm_along_rail if active else 0,
+                res_value=values.resistance,
+                current_mm=active.last_mm_along_rail,
                 active=active,
             )
 
-        # Новый алгоритм: сразу создаём 4 гайки и проверяем на ошибки
-        # (проверка на нули не нужна — приходят ненулевые значения)
-        screws_created: list[ScrewDC] = []
-        for i in range(1, 5):
-            ft_val = getattr(sensor2_data.values, f"frequency_torque_{i}")
-            await self.add_screw(ft_val, sensor2_data.timestamp)
-            screw_dc = self.state.screw_session_item(self.state.screw_session_len - 1)
-            screws_created.append(screw_dc)
+        if self.state.is_tightening_active():
+            if all_torque_zero(values):
+                streak = self.state.record_zero_torque_packet()
+                if streak >= TIMING_CONFIG.cycle_end_zero_packets:
+                    await self._finalize_tightening_cycle(sensor2_data.timestamp, active)
+            else:
+                self.state.reset_zero_torque_streak()
+                self.state.bump_tightening_cycle(values)
+        elif has_moment_activity(values):
+            self.state.start_tightening_cycle(active.last_mm_along_rail, values)
+        return
 
-        errors_to_add: list[Error] = []
+    async def _finalize_tightening_cycle(self, ts: datetime, active: RailSession) -> None:
+        """Завершение цикла: 4 гайки (M1–M4) одновременно, по max моменту и частоте."""
+        cycle = self.state.finish_tightening_cycle()
+        base = cycle.last_values or {}
         ft_threshold = await self.get_threshold("frequency_torque")
-        for idx, screw in enumerate(screws_created, start=1):
-            if ft_threshold:
-                ft_value = screw.frequency_torque
-                if ft_value < ft_threshold.min_value or ft_value > ft_threshold.max_value:
-                    side = "левой" if idx in (1, 2) else "правой"
-                    verdict = "недостаточно" if ft_value < ft_threshold.min_value else "излишне"
-                    description = f"Гайка №{screw.serial_id} по {side} стороне была {verdict} закручена"
-                    errors_to_add.append(
-                        Error(
-                            rail_id=active.rail_id,
-                            screw_id=screw.screw_id,
-                            value_name="frequency_torque",
-                            description=description,
-                            unit_of_measurement=ft_threshold.unit_of_measurement,
-                            value=ft_value,
-                            min_value=ft_threshold.min_value,
-                            max_value=ft_threshold.max_value,
-                            is_critical=ft_threshold.is_critical,
-                        )
+        errors_to_add: list[Error] = []
+        sensors: list[Sensor2] = []
+
+        for ch in range(1, 5):
+            m_key = f"M{ch}"
+            f_key = f"f{ch}"
+            max_m = float(cycle.max_moment.get(m_key, 0.0))
+            max_f = float(cycle.max_freq.get(f_key, 0.0))
+            screw_id = await self.add_screw(
+                max_m,
+                ts,
+                max_frequency=max_f,
+                mm_along_rail=cycle.cycle_start_mm,
+                channel=ch,
+            )
+            if ft_threshold and (max_m < ft_threshold.min_value or max_m > ft_threshold.max_value):
+                side = "левой" if ch in (1, 2) else "правой"
+                verdict = "недостаточно" if max_m < ft_threshold.min_value else "излишне"
+                errors_to_add.append(
+                    Error(
+                        rail_id=active.rail_id,
+                        screw_id=screw_id,
+                        value_name="frequency_torque",
+                        description=f"Гайка №{self.state.get_total_screws()} по {side} стороне была {verdict} закручена",
+                        unit_of_measurement=ft_threshold.unit_of_measurement,
+                        value=max_m,
+                        min_value=ft_threshold.min_value,
+                        max_value=ft_threshold.max_value,
+                        is_critical=ft_threshold.is_critical,
                     )
-            await self.uow.screw.update(screw_id=screw.screw_id, status=ScrewStatus.COMPLETED)
+                )
+            await self.uow.screw.update(screw_id=screw_id, status=ScrewStatus.COMPLETED)
+
+            row = dict(base)
+            row[f"frequency_torque_{ch}"] = max_m
+            row[f"converter_frequency_{ch}"] = max_f
+            for other in range(1, 5):
+                if other != ch:
+                    row[f"frequency_torque_{other}"] = 0.0
+                    row[f"converter_frequency_{other}"] = 0.0
+            sensors.append(Sensor2(timestamp=ts, screw_id=screw_id, **row))
 
         if errors_to_add:
             await self.uow.error.add_many(errors_to_add)
             for err in errors_to_add:
                 await self._publish_error(
-                    timestamp=sensor2_data.timestamp,
+                    timestamp=ts,
                     description=err.description,
                     value_name=err.value_name,
                     value=err.value,
                 )
-        self.state.clear_screw_session()
+        if sensors:
+            await self.uow.sensor2.add_many(sensors)
 
-        sensors = [
-            Sensor2(timestamp=sensor2_data.timestamp, screw_id=s.screw_id, **sensor2_data.values.model_dump())
-            for s in screws_created
-        ]
-        await self.uow.sensor2.add_many(sensors)
-
-    async def add_screw(self, frequency_torque: float, ts: datetime) -> int:
+    async def add_screw(
+        self,
+        frequency_torque: float,
+        ts: datetime,
+        *,
+        max_frequency: float = 0.0,
+        mm_along_rail: int | None = None,
+        channel: int | None = None,
+    ) -> int:
         serial_number = self.state.next_serial()
         active = self.state.get_active_rail()
-        screw = await self.uow.screw.add(Screw(rail_id=active.rail_id, serial_id=serial_number))
+        kwargs: dict = dict(
+            rail_id=active.rail_id,
+            serial_id=serial_number,
+            max_torque=float(frequency_torque),
+            max_frequency=float(max_frequency),
+        )
+        if mm_along_rail is not None:
+            kwargs["mm_along_rail"] = int(mm_along_rail)
+        if channel is not None:
+            kwargs["channel"] = int(channel)
+        screw = await self.uow.screw.add(Screw(**kwargs))
         self.state.append_screw(
             ScrewDC(
                 screw_id=screw.screw_id,
                 serial_id=serial_number,
                 timestamp=ts,
                 frequency_torque=frequency_torque,
+                max_frequency=float(max_frequency),
+                channel=channel,
             )
         )
         return screw.screw_id
@@ -355,11 +427,23 @@ class SensorService(BaseService):
             await self.bind_active_rail(data)
             return
 
+        if (
+            data.values.laser_on_rail_left or data.values.laser_on_rail_right
+        ) and active.laser_off_at is not None:
+            await self.close_active_rail()
+            await self.bind_active_rail(data)
+            return
+
         if data.timestamp < active.start_time:
             return
 
         if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
-            await self.close_active_rail()
+            if active.laser_off_at is None:
+                active.laser_off_at = data.timestamp
+            await self._maybe_close_active_rail(data.timestamp)
+            await self.uow.sensor1.add(
+                Sensor1(rail_id=active.rail_id, timestamp=data.timestamp, **data.values.model_dump())
+            )
             return
 
         self.state.record_laser_flags(
@@ -433,10 +517,94 @@ class SensorService(BaseService):
         return
 
     async def process_second_sensor1_data(self, data: Sensor1Create) -> None:
-        ...
+        values = data.values
+        on_rail = bool(values.laser_on_rail_left or values.laser_on_rail_right)
+        was_on = self.state.post2_laser_was_on()
+
+        if on_rail and not was_on:
+            departed_id = self.state.post2_tracker().on_post2_segment_start()
+            self.state.set_post2_laser_was_on(True)
+            if departed_id is not None:
+                await self._depart_rail_from_post2(departed_id, data.timestamp)
+        elif not on_rail and was_on:
+            self.state.set_post2_laser_was_on(False)
+
+        rail_id = self.state.post2_tracker().rail_at_post2
+        if rail_id is None:
+            rail_id = self.state.is_in_closed(data.timestamp)
+        if rail_id is None:
+            active = self.state.get_active_rail()
+            if active:
+                rail_id = active.rail_id
+
+        if rail_id is not None:
+            await self.uow.sensor1.add(
+                Sensor1(rail_id=rail_id, timestamp=data.timestamp, **values.model_dump())
+            )
+
+    async def _depart_rail_from_post2(self, rail_id: int, ts: datetime) -> None:
+        active = self.state.get_active_rail()
+        if active and active.rail_id == rail_id:
+            active.post2_depart_at = ts
+            if self.state.is_tightening_active():
+                await self._finalize_tightening_cycle(ts, active)
+            await self.close_active_rail()
+            return
+        closed = self.state.find_closed_rail(rail_id)
+        if closed:
+            closed.post2_depart_at = ts
+
+    async def _maybe_close_active_rail(self, event_ts: datetime) -> None:
+        active = self.state.get_active_rail()
+        if active is None:
+            return
+        if active.post2_depart_at is not None:
+            return
+        post2 = self.state.post2_tracker()
+        if active.rail_id == post2.rail_at_post2 or active.rail_id in post2.fifo_rail_ids:
+            return
+        if active.laser_off_at is not None:
+            grace = timedelta(seconds=TIMING_CONFIG.tail_grace_sec)
+            if event_ts >= active.laser_off_at + grace:
+                if self.state.is_tightening_active():
+                    await self._finalize_tightening_cycle(event_ts, active)
+                await self.close_active_rail()
+                return
+        max_open = timedelta(seconds=TIMING_CONFIG.max_rail_open_sec)
+        if event_ts >= active.start_time + max_open:
+            logger.critical("Rail %s exceeded MAX_RAIL_OPEN_SEC — force close", active.rail_id)
+            if self.state.is_tightening_active():
+                await self._finalize_tightening_cycle(event_ts, active)
+            await self.close_active_rail()
+
+    async def discard_active_rail(self) -> None:
+        """Удаляет активную РШР с длиной < 15 м (ошибка распознавания)."""
+        active = self.state.get_active_rail()
+        if active is None:
+            return
+        await self.uow.rail.delete_by_id(active.rail_id)
+        self.state.clear_active()
+        self.state.reset_resistance_stats()
+        self.state.reset_temperature_stats()
+        self.state.reset_gauge_stats()
+        self.state.reset_total_screws()
+        self.state.clear_screw_session()
+        self.state.reset_laser_counts()
+        self.state.reset_tightening_cycle()
+        await self._publish_stages_empty()
 
     async def close_active_rail(self) -> None:
         active = self.state.get_active_rail()
+        if active is None:
+            return
+        length_mm = segment_length_mm(active.start_mm_along_rail, active.last_mm_along_rail)
+        if length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
+            await self.discard_active_rail()
+            return
+        if self.state.is_tightening_active():
+            await self._finalize_tightening_cycle(
+                active.last_timestamp or datetime.utcnow(), active
+            )
         # Закрываем все открытые диапазоны "плохих" значений на конце рельсы
         end_mm = active.last_mm_along_rail
         for key, start_mm, start_value in self.state.pop_all_bad_ranges():
@@ -462,39 +630,64 @@ class SensorService(BaseService):
                 value_name=key,
                 value=start_value,
             )
-        completed_rail = await self.uow.rail.update_fields(
-            rail_id=active.rail_id,
+        update_kwargs: dict = dict(
             status=RailStatus.COMPLETED,
             end_time=active.last_timestamp,
             sleepers=math.ceil(self.state.get_total_screws() / 4),
             side=self._resolve_rail_side(),
         )
+        update_kwargs["length_mm"] = int(length_mm)
+        update_kwargs["resistance_avg"] = self.state.get_resistance_average()
+        update_kwargs["temperature_avg"] = self.state.get_temperature_average()
+        rmin = self.state.get_resistance_min()
+        rmax = self.state.get_resistance_max()
+        if rmin is not None:
+            update_kwargs["resistance_min"] = rmin
+        if rmax is not None:
+            update_kwargs["resistance_max"] = rmax
+        completed_rail = await self.uow.rail.update_fields(
+            rail_id=active.rail_id,
+            **update_kwargs,
+        )
         active.end_time = completed_rail.end_time
         self.state.append_closed(active)
         self.state.clear_active()
         self.state.reset_resistance_stats()
+        self.state.reset_temperature_stats()
         self.state.reset_gauge_stats()
         self.state.reset_total_screws()
         self.state.clear_screw_session()
         self.state.reset_laser_counts()
+        self.state.reset_tightening_cycle()
         await self._publish_stages_empty()
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
+        prev = self.state.get_active_rail()
+        if prev is not None and prev.laser_off_at is not None:
+            await self.close_active_rail()
+
         self.state.reset_total_screws()
         self.state.clear_screw_session()
         self.state.reset_resistance_stats()
+        self.state.reset_temperature_stats()
         self.state.reset_gauge_stats()
+        self.state.reset_tightening_cycle()
         # инициализация счётчиков лазеров для новой активной рельсы
         self.state.reset_laser_counts()
         
         rail = await self.uow.rail.add(Rail(start_time=data.timestamp))
-        self.state.set_active(RailSession(
-            rail_id=rail.rail_id,
-            start_time=data.timestamp,
-            end_time=None,
-            last_mm_along_rail=data.values.mm_along_rail,
-            last_timestamp=data.timestamp,
-        ))
+        start_mm = int(data.values.mm_along_rail)
+        self.state.set_active(
+            RailSession(
+                rail_id=rail.rail_id,
+                start_time=data.timestamp,
+                end_time=None,
+                last_mm_along_rail=start_mm,
+                last_timestamp=data.timestamp,
+                start_mm_along_rail=start_mm,
+            )
+        )
+        self.state.post2_tracker().enqueue_opened_rail(rail.rail_id)
         # Первичное отслеживание диапазонов для метрик Sensor1
         active = self.state.get_active_rail()
         current_mm = int(data.values.mm_along_rail)
@@ -537,33 +730,74 @@ class SensorService(BaseService):
             return RailSide.CENTER
         return RailSide.LEFT if left > right else RailSide.RIGHT
 
-# ---- Queue workers for high-throughput ingestion ----
-async def _sensor1_worker(state: SensorState) -> None:
+# ---- Merged event-time worker ----
+async def _process_merged_event(state: SensorState, ev: MergedSensorEvent) -> None:
     redis = RedisAPI()
-    while True:
-        item: Sensor1Create = await state.sensor1_queue().get()
+    async with state.fsm_lock():
         try:
             async with get_unscoped_db() as db:
                 uow = TimeScaleDBUnitOfWork(db)
                 service = SensorService(uow=uow, redis=redis)
                 service.state = state
-                await service.add_sensor1_data(item)
-        finally:
-            state.sensor1_queue().task_done()
+                if ev.kind == "s1":
+                    await service.add_sensor1_data(ev.payload)
+                else:
+                    await service.add_sensor2_data(ev.payload)
+                active = state.get_active_rail()
+                if active:
+                    await service._maybe_close_active_rail(ev.event_ts)
+        except Exception:
+            logger.exception(
+                "sensor merged worker failed kind=%s event_ts=%s",
+                ev.kind,
+                ev.event_ts,
+            )
+        state.set_watermark(ev.event_ts)
 
 
-async def _sensor2_worker(state: SensorState) -> None:
-    redis = RedisAPI()
+async def _sensor_merged_worker(state: SensorState) -> None:
+    pending: list[tuple[datetime, int, MergedSensorEvent]] = []
+    max_seen: datetime | None = None
+
     while True:
-        item: Sensor2Create = await state.sensor2_queue().get()
+        item: MergedSensorEvent = await state.merged_queue().get()
         try:
-            async with get_unscoped_db() as db:
-                uow = TimeScaleDBUnitOfWork(db)
-                service = SensorService(uow=uow, redis=redis)
-                service.state = state
-                await service.add_sensor2_data(item)
+            seq = next(_event_counter)
+            heapq.heappush(pending, (item.event_ts, seq, item))
+            if max_seen is None or item.event_ts > max_seen:
+                max_seen = item.event_ts
+
+            buffer = timedelta(milliseconds=TIMING_CONFIG.reorder_buffer_ms)
+            watermark = max_seen - buffer
+
+            while pending and pending[0][0] <= watermark:
+                _, _, ev = heapq.heappop(pending)
+                current_wm = state.get_watermark()
+                if current_wm is not None and ev.event_ts < current_wm:
+                    state.mark_packet_reordered()
+
+                closed_rail_id = state.is_in_closed(ev.event_ts)
+                closed_session = state.find_closed_rail(closed_rail_id) if closed_rail_id is not None else None
+                policy = classify_late_packet(
+                    ev.event_ts,
+                    watermark=current_wm,
+                    rail_start=closed_session.start_time if closed_session else None,
+                    rail_end=(closed_session.end_time or closed_session.last_timestamp) if closed_session else None,
+                    rail_closed=closed_session is not None,
+                    config=TIMING_CONFIG,
+                    now=ev.received_at,
+                )
+
+                if policy == LatePacketPolicy.STALE:
+                    state.mark_packet_stale()
+                    logger.warning("Dropping stale packet kind=%s event_ts=%s", ev.kind, ev.event_ts)
+                    continue
+                if policy == LatePacketPolicy.LATE_APPEND:
+                    state.mark_packet_late_append()
+
+                await _process_merged_event(state, ev)
         finally:
-            state.sensor2_queue().task_done()
+            state.merged_queue().task_done()
 
 
 _workers_started = False
@@ -575,10 +809,7 @@ async def start_sensor_workers() -> list[asyncio.Task]:
     if _workers_started:
         return _worker_tasks
     state = SENSOR_STATE
-    _worker_tasks = [
-        asyncio.create_task(_sensor1_worker(state)),
-        asyncio.create_task(_sensor2_worker(state)),
-    ]
+    _worker_tasks = [asyncio.create_task(_sensor_merged_worker(state))]
     _workers_started = True
     return _worker_tasks
 

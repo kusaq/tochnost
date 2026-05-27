@@ -10,6 +10,10 @@ class ScrewRead(BaseModel):
     rail_id: int = Field(description="Идентификатор рельсы")
     serial_id: int = Field(description="Порядковый номер гайки в рельсе")
     status: ScrewStatus = Field(description="Статус гайки")
+    channel: int | None = Field(default=None, description="Канал ПЧ 1–4 (M1–M4)")
+    mm_along_rail: int | None = Field(default=None, description="Позиция по РШР, мм")
+    max_torque: float | None = Field(default=None, description="Максимальный момент за цикл, Н·м")
+    max_frequency: float | None = Field(default=None, description="Максимальная частота за цикл, Гц")
 
 
 class Sensor2Snapshot(BaseModel):

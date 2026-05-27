@@ -1,21 +1,40 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Response, status, HTTPException
+import asyncio
 
 from api.v1.sensor.dependencies import SensorServiceDep
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read, SensorStateResetRequest
-from api.v1.sensor.state import SensorStateDep
+from api.v1.sensor.state import SensorStateDep, MergedSensorEvent
 from api.v1.base.dependencies import PaginationDep
 
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
 
 
+def _enqueue(state, event: MergedSensorEvent) -> None:
+    try:
+        state.merged_queue().put_nowait(event)
+    except asyncio.QueueFull:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sensor ingestion queue full",
+        )
+
+
 @router.post("/first", status_code=status.HTTP_202_ACCEPTED, summary="Буферизованная запись Sensor1")
 async def save_first_sensor_data(
     sensor_data: Sensor1Create,
-    # sensor_service: SensorServiceDep,
     state: SensorStateDep,
 ) -> Response:
-    # Вставляем в очередь для асинхронной обработки воркерами
-    await state.sensor1_queue().put(sensor_data)
+    _enqueue(
+        state,
+        MergedSensorEvent(
+            event_ts=sensor_data.timestamp,
+            kind="s1",
+            payload=sensor_data,
+            received_at=datetime.utcnow(),
+        ),
+    )
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -43,11 +62,17 @@ async def reset_sensor_state(
 @router.post("/second", status_code=status.HTTP_202_ACCEPTED, summary="Буферизованная запись Sensor2")
 async def save_second_sensor_data(
     sensor_data: Sensor2Create,
-    # sensor_service: SensorServiceDep,
     state: SensorStateDep,
 ) -> Response:
-    # Вставляем в очередь для асинхронной обработки воркерами
-    await state.sensor2_queue().put(sensor_data)
+    _enqueue(
+        state,
+        MergedSensorEvent(
+            event_ts=sensor_data.timestamp,
+            kind="s2",
+            payload=sensor_data,
+            received_at=datetime.utcnow(),
+        ),
+    )
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 

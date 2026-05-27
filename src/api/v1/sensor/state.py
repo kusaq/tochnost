@@ -1,36 +1,135 @@
 from collections import deque
 import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Deque, Annotated
+from typing import Any, Deque, Annotated, Literal
 
 from fastapi import Depends
 
 from api.v1.sensor.schemas import RailSession, Screw as ScrewDC
+from rshr_core.tightening import MOMENT_KEYS, FREQ_KEYS, bump_peaks
+
+
+@dataclass
+class TighteningCycleState:
+    active: bool = False
+    cycle_start_mm: int = 0
+    max_moment: dict[str, float] = field(default_factory=lambda: {k: 0.0 for k in MOMENT_KEYS})
+    max_freq: dict[str, float] = field(default_factory=lambda: {k: 0.0 for k in FREQ_KEYS})
+    last_values: dict[str, Any] = field(default_factory=dict)
+    zero_streak: int = 0
+
+
+@dataclass
+class Post2Tracker:
+    """FIFO matching post1 rails ↔ post2 laser segments."""
+
+    fifo_rail_ids: list[int] = field(default_factory=list)
+    rail_at_post2: int | None = None
+    post2_laser_on: bool = False
+    post2_segment_index: int = 0
+    unmatched_segments: int = 0
+
+    def enqueue_opened_rail(self, rail_id: int) -> None:
+        self.fifo_rail_ids.append(rail_id)
+
+    def on_post2_segment_start(self) -> int | None:
+        """New laser segment on post2 — previous rail departs. Returns departed rail_id."""
+        departed = self.rail_at_post2
+        if self.fifo_rail_ids:
+            self.rail_at_post2 = self.fifo_rail_ids.pop(0)
+        else:
+            self.rail_at_post2 = None
+            self.unmatched_segments += 1
+        self.post2_segment_index += 1
+        self.post2_laser_on = True
+        return departed
+
+
+@dataclass
+class MergedSensorEvent:
+    event_ts: datetime
+    kind: Literal["s1", "s2"]
+    payload: Any
+    received_at: datetime
 
 
 class SensorState:
     """
     Хранит оперативное состояние датчиков и рельсов между запросами (без доступа к БД).
     """
-    def __init__(self, closed_keep_limit: int = 10) -> None:
+
+    def __init__(self, closed_keep_limit: int = 32) -> None:
         self._active: RailSession | None = None
         self._closed: Deque[RailSession] = deque(maxlen=closed_keep_limit)
         self._total_screws: int = 0
         self._screw_session: Deque[ScrewDC] = deque()
-        # high-throughput ingestion queues
+        self._merged_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
         self._sensor1_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
         self._sensor2_queue: asyncio.Queue = asyncio.Queue(maxsize=50000)
-        # generic bad ranges by metric key: key -> (start_mm, start_value)
         self._bad_ranges: dict[str, tuple[int, float]] = {}
-        # resistance stats
         self._res_sum: float = 0.0
         self._res_count: int = 0
         self._res_current: float = 0.0
-        # gauge stats
         self._gauge_sum: float = 0.0
         self._gauge_count: int = 0
+        self._temp_sum: float = 0.0
+        self._temp_count: int = 0
+        self._res_min: float | None = None
+        self._res_max: float | None = None
+        self._tightening = TighteningCycleState()
+        self._post2 = Post2Tracker()
+        self._post2_laser_was_on: bool = False
+        self._fsm_lock = asyncio.Lock()
+        self._watermark: datetime | None = None
+        self._packets_reordered: int = 0
+        self._packets_late_append: int = 0
+        self._packets_stale: int = 0
 
-    # ---- Active rail helpers ----
+    def merged_queue(self) -> asyncio.Queue:
+        return self._merged_queue
+
+    def sensor1_queue(self) -> asyncio.Queue:
+        return self._sensor1_queue
+
+    def sensor2_queue(self) -> asyncio.Queue:
+        return self._sensor2_queue
+
+    def fsm_lock(self) -> asyncio.Lock:
+        return self._fsm_lock
+
+    def get_watermark(self) -> datetime | None:
+        return self._watermark
+
+    def set_watermark(self, ts: datetime) -> None:
+        if self._watermark is None or ts > self._watermark:
+            self._watermark = ts
+
+    def mark_packet_reordered(self) -> None:
+        self._packets_reordered += 1
+
+    def mark_packet_late_append(self) -> None:
+        self._packets_late_append += 1
+
+    def mark_packet_stale(self) -> None:
+        self._packets_stale += 1
+
+    def packet_counters(self) -> dict[str, int]:
+        return {
+            "packets_reordered": self._packets_reordered,
+            "packets_late_append": self._packets_late_append,
+            "packets_stale": self._packets_stale,
+        }
+
+    def post2_tracker(self) -> Post2Tracker:
+        return self._post2
+
+    def post2_laser_was_on(self) -> bool:
+        return self._post2_laser_was_on
+
+    def set_post2_laser_was_on(self, on: bool) -> None:
+        self._post2_laser_was_on = on
+
     def has_active_rail(self) -> bool:
         return self._active is not None
 
@@ -48,7 +147,6 @@ class SensorState:
             self._active.last_mm_along_rail = mm_along_rail
             self._active.last_timestamp = ts
 
-    # ---- Screws/session helpers ----
     @property
     def has_screw_session(self) -> bool:
         return len(self._screw_session) > 0
@@ -73,14 +171,6 @@ class SensorState:
     def iter_screws(self):
         return iter(self._screw_session)
 
-    # ---- Ingestion queues ----
-    def sensor1_queue(self) -> asyncio.Queue:
-        return self._sensor1_queue
-
-    def sensor2_queue(self) -> asyncio.Queue:
-        return self._sensor2_queue
-
-    # ---- Generic bad range helpers ----
     def is_bad_range_active(self, key: str) -> bool:
         return key in self._bad_ranges
 
@@ -100,7 +190,6 @@ class SensorState:
         self._bad_ranges.clear()
         return items
 
-    # ---- Total screws helpers ----
     def reset_total_screws(self) -> None:
         self._total_screws = 0
 
@@ -111,11 +200,17 @@ class SensorState:
     def get_total_screws(self) -> int:
         return self._total_screws
 
-    # ---- Resistance stats helpers ----
     def update_resistance(self, value: float) -> None:
-        self._res_current = float(value)
-        self._res_sum += float(value)
+        v = float(value)
+        self._res_current = v
+        if v <= 0 or v > 65000:
+            return
+        self._res_sum += v
         self._res_count += 1
+        if self._res_min is None or v < self._res_min:
+            self._res_min = v
+        if self._res_max is None or v > self._res_max:
+            self._res_max = v
 
     def get_resistance_current(self) -> float:
         return float(self._res_current)
@@ -125,12 +220,69 @@ class SensorState:
             return 0.0
         return float(self._res_sum / self._res_count)
 
+    def get_resistance_min(self) -> float | None:
+        return self._res_min
+
+    def get_resistance_max(self) -> float | None:
+        return self._res_max
+
     def reset_resistance_stats(self) -> None:
         self._res_sum = 0.0
         self._res_count = 0
         self._res_current = 0.0
+        self._res_min = None
+        self._res_max = None
 
-    # ---- Gauge (mm_gauge) stats helpers ----
+    def update_temperature(self, value: float) -> None:
+        self._temp_sum += float(value)
+        self._temp_count += 1
+
+    def get_temperature_average(self) -> float:
+        if self._temp_count == 0:
+            return 0.0
+        return float(self._temp_sum / self._temp_count)
+
+    def reset_temperature_stats(self) -> None:
+        self._temp_sum = 0.0
+        self._temp_count = 0
+
+    def reset_tightening_cycle(self) -> None:
+        self._tightening = TighteningCycleState()
+
+    def is_tightening_active(self) -> bool:
+        return self._tightening.active
+
+    def start_tightening_cycle(self, mm_along_rail: int, values: Any) -> None:
+        self._tightening.active = True
+        self._tightening.cycle_start_mm = int(mm_along_rail)
+        self._tightening.max_moment = {k: 0.0 for k in MOMENT_KEYS}
+        self._tightening.max_freq = {k: 0.0 for k in FREQ_KEYS}
+        self._tightening.zero_streak = 0
+        if hasattr(values, "model_dump"):
+            self._tightening.last_values = values.model_dump()
+        else:
+            self._tightening.last_values = dict(values)
+        bump_peaks(self._tightening.max_moment, self._tightening.max_freq, values)
+
+    def bump_tightening_cycle(self, values: Any) -> None:
+        if hasattr(values, "model_dump"):
+            self._tightening.last_values = values.model_dump()
+        else:
+            self._tightening.last_values = dict(values)
+        bump_peaks(self._tightening.max_moment, self._tightening.max_freq, values)
+
+    def record_zero_torque_packet(self) -> int:
+        self._tightening.zero_streak += 1
+        return self._tightening.zero_streak
+
+    def reset_zero_torque_streak(self) -> None:
+        self._tightening.zero_streak = 0
+
+    def finish_tightening_cycle(self) -> TighteningCycleState:
+        finished = self._tightening
+        self._tightening = TighteningCycleState()
+        return finished
+
     def update_gauge(self, value: float) -> None:
         self._gauge_sum += float(value)
         self._gauge_count += 1
@@ -144,16 +296,11 @@ class SensorState:
         self._gauge_sum = 0.0
         self._gauge_count = 0
 
-    # ---- Sides counts (for active rail) ----
     def reset_laser_counts(self) -> None:
         self._laser_left_true_count = 0
         self._laser_right_true_count = 0
 
     def record_laser_flags(self, left_on_rail: bool, right_on_rail: bool) -> None:
-        """
-        Учитывает текущие показания попадания лазера на рельс слева/справа.
-        """
-        # Инициализация на лету, если не вызывали reset явно
         if not hasattr(self, "_laser_left_true_count"):
             self._laser_left_true_count = 0
             self._laser_right_true_count = 0
@@ -169,10 +316,6 @@ class SensorState:
         return int(self._laser_left_true_count), int(self._laser_right_true_count)
 
     def get_left_right_counts(self) -> tuple[int, int]:
-        """
-        Возвращает (left_count, right_count) исходя из общего количества гаек:
-        В каждом батче из 4: 1 и 2 — левый, 3 и 4 — правый.
-        """
         total = self._total_screws
         full_batches = total // 4
         rem = total % 4
@@ -180,7 +323,6 @@ class SensorState:
         right = total - left
         return left, right
 
-    # ---- Closed rails helpers ----
     def closed_len(self) -> int:
         return len(self._closed)
 
@@ -190,10 +332,13 @@ class SensorState:
     def append_closed(self, session: RailSession) -> None:
         self._closed.append(session)
 
+    def find_closed_rail(self, rail_id: int) -> RailSession | None:
+        for session in self._closed:
+            if session.rail_id == rail_id:
+                return session
+        return None
+
     def is_in_closed(self, ts: datetime) -> int | None:
-        """
-        Проверяет, входит ли ts в один из завершённых интервалов.
-        """
         for session in reversed(self._closed):
             if ts < session.start_time:
                 continue
@@ -205,20 +350,24 @@ class SensorState:
         return None
 
     def reset(self, *, drain_queues: bool = True) -> None:
-        """
-        Полный сброс состояния. Используйте для восстановления после сбоев или тестов.
-        drain_queues: если True, очищает очереди S1/S2 (буферизованные данные теряются).
-        """
         self.clear_active()
         self._closed.clear()
         self.clear_screw_session()
         self.reset_total_screws()
         self.reset_resistance_stats()
+        self.reset_temperature_stats()
         self.reset_gauge_stats()
         self.reset_laser_counts()
+        self.reset_tightening_cycle()
+        self._post2 = Post2Tracker()
+        self._post2_laser_was_on = False
+        self._watermark = None
+        self._packets_reordered = 0
+        self._packets_late_append = 0
+        self._packets_stale = 0
         self._bad_ranges.clear()
         if drain_queues:
-            for q in (self._sensor1_queue, self._sensor2_queue):
+            for q in (self._merged_queue, self._sensor1_queue, self._sensor2_queue):
                 while True:
                     try:
                         q.get_nowait()
@@ -229,7 +378,9 @@ class SensorState:
 
 SENSOR_STATE = SensorState()
 
+
 def get_sensor_state() -> SensorState:
     return SENSOR_STATE
+
 
 SensorStateDep = Annotated[SensorState, Depends(get_sensor_state)]

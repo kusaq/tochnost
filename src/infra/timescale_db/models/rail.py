@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum as PyEnum
-from sqlalchemy import String, BigInteger, Enum, Integer
+from sqlalchemy import String, BigInteger, Enum, Integer, Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 from infra.timescale_db.mixins import CreateTimestampMixin
@@ -37,3 +37,8 @@ class Rail(Base, CreateTimestampMixin):
     sleepers: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start_time: Mapped[datetime | None] = mapped_column(nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(nullable=True)
+    length_mm: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="Длина РШР, мм")
+    resistance_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resistance_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resistance_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    temperature_avg: Mapped[float | None] = mapped_column(Float, nullable=True)

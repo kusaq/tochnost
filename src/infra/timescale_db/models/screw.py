@@ -1,6 +1,6 @@
 from enum import Enum as PyEnum
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, Enum
+from sqlalchemy import BigInteger, ForeignKey, Integer, Enum, Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 from infra.timescale_db.mixins import CreateTimestampMixin
@@ -29,3 +29,7 @@ class Screw(Base, CreateTimestampMixin):
         nullable=False,
         comment="идентификатор рельса",
     )
+    mm_along_rail: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    channel: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="Канал ПЧ 1–4 (M1–M4)")
+    max_torque: Mapped[float | None] = mapped_column(Float, nullable=True, comment="Макс. момент за цикл, Н·м")
+    max_frequency: Mapped[float | None] = mapped_column(Float, nullable=True, comment="Макс. частота за цикл, Гц")

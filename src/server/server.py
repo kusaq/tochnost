@@ -1,3 +1,5 @@
+import rshr_path  # noqa: F401 — bootstrap libs/rshr_core on sys.path
+
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 

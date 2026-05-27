@@ -19,8 +19,7 @@ class ScrewService(BaseService):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Screw not found")
         all_s2 = await self.uow.sensor2.list_by_screw(screw_id)
         errors = await self.uow.error.list_by_screw(screw_id)
-        # канал гайки: позиции в батчах 1..4, затем повторяются
-        ch = ((screw.serial_id - 1) % 4) + 1
+        ch = screw.channel if screw.channel is not None else ((screw.serial_id - 1) % 4) + 1
         snapshots: list[Sensor2Snapshot] = []
         for s2 in all_s2:
             snapshots.append(
@@ -30,8 +29,16 @@ class ScrewService(BaseService):
                     temperature=s2.temperature,
                     humidity=s2.humidity,
                     frequency_status=getattr(s2, f"frequency_status_{ch}"),
-                    frequency_torque=getattr(s2, f"frequency_torque_{ch}"),
-                    converter_frequency=getattr(s2, f"converter_frequency_{ch}"),
+                    frequency_torque=(
+                        screw.max_torque
+                        if screw.max_torque is not None
+                        else getattr(s2, f"frequency_torque_{ch}")
+                    ),
+                    converter_frequency=(
+                        screw.max_frequency
+                        if screw.max_frequency is not None
+                        else getattr(s2, f"converter_frequency_{ch}")
+                    ),
                 )
             )
         return ScrewDetail(
@@ -47,15 +54,23 @@ class ScrewService(BaseService):
             last = await self.uow.sensor2.get_last_by_screw(screw.screw_id)
             snapshot: Sensor2Snapshot | None = None
             if last:
-                ch = ((screw.serial_id - 1) % 4) + 1
+                ch = screw.channel if screw.channel is not None else ((screw.serial_id - 1) % 4) + 1
                 snapshot = Sensor2Snapshot(
                     timestamp=last.timestamp,
                     resistance=last.resistance,
                     temperature=last.temperature,
                     humidity=last.humidity,
                     frequency_status=getattr(last, f"frequency_status_{ch}"),
-                    frequency_torque=getattr(last, f"frequency_torque_{ch}"),
-                    converter_frequency=getattr(last, f"converter_frequency_{ch}"),
+                    frequency_torque=(
+                        screw.max_torque
+                        if screw.max_torque is not None
+                        else getattr(last, f"frequency_torque_{ch}")
+                    ),
+                    converter_frequency=(
+                        screw.max_frequency
+                        if screw.max_frequency is not None
+                        else getattr(last, f"converter_frequency_{ch}")
+                    ),
                 )
             result.append(
                 ScrewWithLastSensor(

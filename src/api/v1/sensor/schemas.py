@@ -10,6 +10,8 @@ class Screw:
     serial_id: int
     timestamp: datetime
     frequency_torque: float
+    max_frequency: float = 0.0
+    channel: int | None = None
 
 
 @dataclass(slots=True)
@@ -19,6 +21,9 @@ class RailSession:
     end_time: datetime | None
     last_mm_along_rail: int
     last_timestamp: datetime
+    start_mm_along_rail: int = 0
+    laser_off_at: datetime | None = None
+    post2_depart_at: datetime | None = None
 
 
 class Sensor1Values(BaseModel):
