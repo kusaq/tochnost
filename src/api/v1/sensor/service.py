@@ -250,6 +250,7 @@ class SensorService(BaseService):
                 screw_id = await self.add_screw(
                     getattr(sensor2_data.values, f"frequency_torque_{i}"),
                     sensor2_data.timestamp,
+                    rail_id=active.rail_id,
                 )
             else:
                 screw_id = self.state.screw_session_item(i - 1).screw_id
@@ -259,28 +260,31 @@ class SensorService(BaseService):
             )
         await self.uow.sensor2.add_many(sensors)
 
-    def _modbus_target_rail_id(self) -> int | None:
-        post2 = self.state.post2_tracker().rail_at_post2
-        if post2 is not None:
-            return post2
+    def _modbus_target_rail_id(self, *, for_modbus: bool = False) -> int | None:
+        """Modbus (закрутка) — только рельса на посту 2; без fallback на fifo/active."""
+        post2 = self.state.post2_tracker()
+        if post2.rail_at_post2 is not None:
+            return post2.rail_at_post2
+        if for_modbus:
+            return None
+        if post2.fifo_rail_ids:
+            return post2.fifo_rail_ids[0]
         active = self.state.get_active_rail()
         return active.rail_id if active else None
 
     def _rail_session_for_modbus(self, rail_id: int) -> RailSession | None:
-        active = self.state.get_active_rail()
-        if active and active.rail_id == rail_id:
-            return active
-        return self.state.find_closed_rail(rail_id) or active
+        return self.state.find_rail_session(rail_id)
 
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
         await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
         await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
 
-        rail_id = self._modbus_target_rail_id()
+        rail_id = self._modbus_target_rail_id(for_modbus=True)
         if rail_id is None:
+            self.state.mark_modbus_skipped_no_post2()
             return
-        active = self._rail_session_for_modbus(rail_id)
-        if active is None:
+        session = self._rail_session_for_modbus(rail_id)
+        if session is None:
             return
 
         values = sensor2_data.values
@@ -293,29 +297,36 @@ class SensorService(BaseService):
                 metric_key="resistance",
                 res_threshold=res_threshold,
                 res_value=values.resistance,
-                current_mm=active.last_mm_along_rail,
-                active=active,
+                current_mm=session.last_mm_along_rail,
+                active=session,
             )
+
+        tightening_rail = self.state.tightening_rail_id()
+        if self.state.is_tightening_active() and tightening_rail is not None and tightening_rail != rail_id:
+            prev_session = self.state.find_rail_session(tightening_rail)
+            if prev_session is not None:
+                await self._finalize_tightening_cycle(sensor2_data.timestamp, prev_session)
 
         if self.state.is_tightening_active():
             if all_torque_zero(values):
                 streak = self.state.record_zero_torque_packet()
                 if streak >= TIMING_CONFIG.cycle_end_zero_packets:
-                    await self._finalize_tightening_cycle(sensor2_data.timestamp, active)
+                    await self._finalize_tightening_cycle(sensor2_data.timestamp, session)
             else:
                 self.state.reset_zero_torque_streak()
                 self.state.bump_tightening_cycle(values)
         elif has_moment_activity(values):
-            self.state.start_tightening_cycle(active.last_mm_along_rail, values)
+            self.state.start_tightening_cycle(rail_id, session.last_mm_along_rail, values)
         return
 
-    async def _finalize_tightening_cycle(self, ts: datetime, active: RailSession) -> None:
+    async def _finalize_tightening_cycle(self, ts: datetime, session: RailSession) -> None:
         """Завершение цикла: 4 гайки (M1–M4) одновременно, по max моменту и частоте."""
         cycle = self.state.finish_tightening_cycle()
         base = cycle.last_values or {}
         ft_threshold = await self.get_threshold("frequency_torque")
         errors_to_add: list[Error] = []
         sensors: list[Sensor2] = []
+        rail_id = session.rail_id
 
         for ch in range(1, 5):
             m_key = f"M{ch}"
@@ -325,6 +336,7 @@ class SensorService(BaseService):
             screw_id = await self.add_screw(
                 max_m,
                 ts,
+                rail_id=rail_id,
                 max_frequency=max_f,
                 mm_along_rail=cycle.cycle_start_mm,
                 channel=ch,
@@ -332,12 +344,13 @@ class SensorService(BaseService):
             if ft_threshold and (max_m < ft_threshold.min_value or max_m > ft_threshold.max_value):
                 side = "левой" if ch in (1, 2) else "правой"
                 verdict = "недостаточно" if max_m < ft_threshold.min_value else "излишне"
+                serial = self.state.get_rail_screw_count(rail_id)
                 errors_to_add.append(
                     Error(
-                        rail_id=active.rail_id,
+                        rail_id=rail_id,
                         screw_id=screw_id,
                         value_name="frequency_torque",
-                        description=f"Гайка №{self.state.get_total_screws()} по {side} стороне была {verdict} закручена",
+                        description=f"Гайка №{serial} по {side} стороне была {verdict} закручена",
                         unit_of_measurement=ft_threshold.unit_of_measurement,
                         value=max_m,
                         min_value=ft_threshold.min_value,
@@ -373,14 +386,14 @@ class SensorService(BaseService):
         frequency_torque: float,
         ts: datetime,
         *,
+        rail_id: int,
         max_frequency: float = 0.0,
         mm_along_rail: int | None = None,
         channel: int | None = None,
     ) -> int:
-        serial_number = self.state.next_serial()
-        active = self.state.get_active_rail()
+        serial_number = self.state.next_serial_for_rail(rail_id)
         kwargs: dict = dict(
-            rail_id=active.rail_id,
+            rail_id=rail_id,
             serial_id=serial_number,
             max_torque=float(frequency_torque),
             max_frequency=float(max_frequency),
@@ -430,7 +443,7 @@ class SensorService(BaseService):
         if (
             data.values.laser_on_rail_left or data.values.laser_on_rail_right
         ) and active.laser_off_at is not None:
-            await self.close_active_rail()
+            await self.park_active_for_post2()
             await self.bind_active_rail(data)
             return
 
@@ -493,7 +506,7 @@ class SensorService(BaseService):
         gauge_cur = data.values.mm_gauge
         gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
         errors_count = await self.uow.error.count_by_rail(active.rail_id)
-        screws_completed = self.state.get_total_screws()
+        screws_completed = self.state.get_dashboard_screws()
         mm_gauge_avg = self.state.get_gauge_average()
         await self._publish_stages(
             errors_count=errors_count,
@@ -520,22 +533,35 @@ class SensorService(BaseService):
         values = data.values
         on_rail = bool(values.laser_on_rail_left or values.laser_on_rail_right)
         was_on = self.state.post2_laser_was_on()
+        post2 = self.state.post2_tracker()
+        ts = data.timestamp
 
         if on_rail and not was_on:
-            departed_id = self.state.post2_tracker().on_post2_segment_start()
-            self.state.set_post2_laser_was_on(True)
-            if departed_id is not None:
-                await self._depart_rail_from_post2(departed_id, data.timestamp)
+            min_seg = timedelta(seconds=TIMING_CONFIG.post2_min_segment_sec)
+            if (
+                post2.last_laser_off_at is not None
+                and (ts - post2.last_laser_off_at) < min_seg
+            ):
+                logger.debug("post2 laser glitch ignored (%.2fs)", (ts - post2.last_laser_off_at).total_seconds())
+            elif not post2.fifo_rail_ids:
+                post2.unmatched_segments += 1
+                self.state.set_post2_laser_was_on(True)
+                logger.debug(
+                    "post2 segment ignored: empty fifo (unmatched=%s)",
+                    post2.unmatched_segments,
+                )
+            else:
+                departed_id = post2.on_post2_segment_start()
+                self.state.set_post2_laser_was_on(True)
+                if departed_id is not None:
+                    await self._depart_rail_from_post2(departed_id, ts)
         elif not on_rail and was_on:
             self.state.set_post2_laser_was_on(False)
+            post2.last_laser_off_at = ts
 
-        rail_id = self.state.post2_tracker().rail_at_post2
+        rail_id = self._modbus_target_rail_id(for_modbus=False)
         if rail_id is None:
             rail_id = self.state.is_in_closed(data.timestamp)
-        if rail_id is None:
-            active = self.state.get_active_rail()
-            if active:
-                rail_id = active.rail_id
 
         if rail_id is not None:
             await self.uow.sensor1.add(
@@ -543,22 +569,21 @@ class SensorService(BaseService):
             )
 
     async def _depart_rail_from_post2(self, rail_id: int, ts: datetime) -> None:
-        active = self.state.get_active_rail()
-        if active and active.rail_id == rail_id:
-            active.post2_depart_at = ts
-            if self.state.is_tightening_active():
-                await self._finalize_tightening_cycle(ts, active)
-            await self.close_active_rail()
+        session = self.state.find_rail_session(rail_id)
+        if session is None:
             return
-        closed = self.state.find_closed_rail(rail_id)
-        if closed:
-            closed.post2_depart_at = ts
+        session.post2_depart_at = ts
+        if self.state.is_tightening_active() and self.state.tightening_rail_id() == rail_id:
+            await self._finalize_tightening_cycle(ts, session)
+        await self.finalize_rail(session)
 
     async def _maybe_close_active_rail(self, event_ts: datetime) -> None:
         active = self.state.get_active_rail()
         if active is None:
             return
         if active.post2_depart_at is not None:
+            return
+        if self.state.is_rail_waiting_at_post2(active.rail_id):
             return
         post2 = self.state.post2_tracker()
         if active.rail_id == post2.rail_at_post2 or active.rail_id in post2.fifo_rail_ids:
@@ -568,20 +593,53 @@ class SensorService(BaseService):
             if event_ts >= active.laser_off_at + grace:
                 if self.state.is_tightening_active():
                     await self._finalize_tightening_cycle(event_ts, active)
-                await self.close_active_rail()
+                await self.finalize_rail(active)
                 return
         max_open = timedelta(seconds=TIMING_CONFIG.max_rail_open_sec)
         if event_ts >= active.start_time + max_open:
             logger.critical("Rail %s exceeded MAX_RAIL_OPEN_SEC — force close", active.rail_id)
             if self.state.is_tightening_active():
                 await self._finalize_tightening_cycle(event_ts, active)
-            await self.close_active_rail()
+            await self.finalize_rail(active)
+
+    async def park_active_for_post2(self) -> None:
+        """Снимает РШР с поста 1 после laser_off; закрутка и эпюра — на посту 2."""
+        active = self.state.get_active_rail()
+        if active is None or active.laser_off_at is None:
+            return
+        pass_sec = (active.laser_off_at - active.start_time).total_seconds()
+        if pass_sec > TIMING_CONFIG.post1_max_pass_sec:
+            logger.warning(
+                "post1 pass discarded (%.0fs > %.0fs) rail_id=%s",
+                pass_sec,
+                TIMING_CONFIG.post1_max_pass_sec,
+                active.rail_id,
+            )
+            self.state.post2_tracker().remove_from_fifo(active.rail_id)
+            await self.discard_active_rail()
+            return
+        if self.state.is_tightening_active() and self.state.tightening_rail_id() == active.rail_id:
+            await self._finalize_tightening_cycle(
+                active.last_timestamp or datetime.utcnow(),
+                active,
+            )
+        left, right = self.state.get_laser_counts()
+        active.laser_left_count = left
+        active.laser_right_count = right
+        self.state.park_at_post2(active)
+        self.state.clear_active()
+        self.state.reset_resistance_stats()
+        self.state.reset_temperature_stats()
+        self.state.reset_gauge_stats()
+        self.state.reset_laser_counts()
+        await self._publish_stages_empty()
 
     async def discard_active_rail(self) -> None:
         """Удаляет активную РШР с длиной < 15 м (ошибка распознавания)."""
         active = self.state.get_active_rail()
         if active is None:
             return
+        self.state.post2_tracker().remove_from_fifo(active.rail_id)
         await self.uow.rail.delete_by_id(active.rail_id)
         self.state.clear_active()
         self.state.reset_resistance_stats()
@@ -597,23 +655,36 @@ class SensorService(BaseService):
         active = self.state.get_active_rail()
         if active is None:
             return
-        length_mm = segment_length_mm(active.start_mm_along_rail, active.last_mm_along_rail)
+        await self.finalize_rail(active)
+
+    async def finalize_rail(self, session: RailSession) -> None:
+        """Финальное закрытие РШР (эпюра, статус) — после ухода с поста 2 или форс-закрытия на посту 1."""
+        rail_id = session.rail_id
+        if self.state.get_active_rail() and self.state.get_active_rail().rail_id == rail_id:
+            self.state.clear_active()
+        self.state.pop_waiting_rail(rail_id)
+
+        length_mm = segment_length_mm(session.start_mm_along_rail, session.last_mm_along_rail)
         if length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
-            await self.discard_active_rail()
+            await self.uow.rail.delete_by_id(rail_id)
+            self.state.clear_rail_screw_count(rail_id)
+            await self._publish_stages_empty()
             return
-        if self.state.is_tightening_active():
+
+        if self.state.is_tightening_active() and self.state.tightening_rail_id() == rail_id:
             await self._finalize_tightening_cycle(
-                active.last_timestamp or datetime.utcnow(), active
+                session.last_timestamp or datetime.utcnow(),
+                session,
             )
-        # Закрываем все открытые диапазоны "плохих" значений на конце рельсы
-        end_mm = active.last_mm_along_rail
+
+        end_mm = session.last_mm_along_rail
         for key, start_mm, start_value in self.state.pop_all_bad_ranges():
             th = await self.get_threshold(key)
             if th is None:
                 continue
             await self.uow.error.add(
                 Error(
-                    rail_id=active.rail_id,
+                    rail_id=rail_id,
                     screw_id=None,
                     value_name=key,
                     description=f"{self.METRIC_DISPLAY.get(key, key)} было неприемлемым с {start_mm} мм по {end_mm} мм",
@@ -625,16 +696,26 @@ class SensorService(BaseService):
                 )
             )
             await self._publish_error(
-                timestamp=(active.last_timestamp if active.last_timestamp else datetime.now()),
+                timestamp=(session.last_timestamp if session.last_timestamp else datetime.now()),
                 description=f"{self.METRIC_DISPLAY.get(key, key)} было неприемлемым с {start_mm} мм по {end_mm} мм",
                 value_name=key,
                 value=start_value,
             )
+
+        screw_count = await self.uow.screw.count_by_rail(rail_id)
+        self.state.set_rail_screw_count(rail_id, screw_count)
+
+        sleepers_value: int | None
+        if screw_count == 0:
+            sleepers_value = None
+        else:
+            sleepers_value = math.ceil(screw_count / 4)
+
         update_kwargs: dict = dict(
             status=RailStatus.COMPLETED,
-            end_time=active.last_timestamp,
-            sleepers=math.ceil(self.state.get_total_screws() / 4),
-            side=self._resolve_rail_side(),
+            end_time=session.last_timestamp,
+            sleepers=sleepers_value,
+            side=self._resolve_rail_side_from_session(session),
         )
         update_kwargs["length_mm"] = int(length_mm)
         update_kwargs["resistance_avg"] = self.state.get_resistance_average()
@@ -645,18 +726,15 @@ class SensorService(BaseService):
             update_kwargs["resistance_min"] = rmin
         if rmax is not None:
             update_kwargs["resistance_max"] = rmax
-        completed_rail = await self.uow.rail.update_fields(
-            rail_id=active.rail_id,
-            **update_kwargs,
-        )
-        active.end_time = completed_rail.end_time
-        self.state.append_closed(active)
-        self.state.clear_active()
+        completed_rail = await self.uow.rail.update_fields(rail_id=rail_id, **update_kwargs)
+        session.end_time = completed_rail.end_time if completed_rail else session.last_timestamp
+        await self._record_tightening_count_anomaly(rail_id, screw_count, length_mm)
+        self.state.append_closed(session)
+        self.state.clear_rail_screw_count(rail_id)
+        self.state.clear_screw_session()
         self.state.reset_resistance_stats()
         self.state.reset_temperature_stats()
         self.state.reset_gauge_stats()
-        self.state.reset_total_screws()
-        self.state.clear_screw_session()
         self.state.reset_laser_counts()
         self.state.reset_tightening_cycle()
         await self._publish_stages_empty()
@@ -664,9 +742,8 @@ class SensorService(BaseService):
     async def bind_active_rail(self, data: Sensor1Create) -> None:
         prev = self.state.get_active_rail()
         if prev is not None and prev.laser_off_at is not None:
-            await self.close_active_rail()
+            await self.park_active_for_post2()
 
-        self.state.reset_total_screws()
         self.state.clear_screw_session()
         self.state.reset_resistance_stats()
         self.state.reset_temperature_stats()
@@ -716,13 +793,44 @@ class SensorService(BaseService):
     async def list_sensor1_by_rail(self, rail_id: int, *, limit: int = 20, offset: int = 0):
         return await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=limit, offset=offset)
 
-    def _resolve_rail_side(self) -> RailSide | None:
-        """
-        Определяет сторону рельсы по накопленным значениям:
-        - если |left - right| <= 1 — Центральная
-        - иначе — сторона с большим количеством True.
-        """
-        left, right = self.state.get_laser_counts()
+    async def _record_tightening_count_anomaly(
+        self, rail_id: int, screw_count: int, length_mm: int
+    ) -> None:
+        """Органика данных: фиксируем 0 / <160 / >220 гаек без «лечения» на объекте."""
+        if length_mm < self.RSHR_LENGTH_MIN_OK_MM:
+            return
+        desc: str | None = None
+        if screw_count == 0:
+            desc = "Нет данных закрутки (0 гаек) при нормальной длине РШР"
+        elif screw_count < TIMING_CONFIG.screws_count_min_ok:
+            desc = (
+                f"Мало гаек: {screw_count} (ожидалось "
+                f"{TIMING_CONFIG.screws_count_min_ok}–{TIMING_CONFIG.screws_count_max_ok})"
+            )
+        elif screw_count > TIMING_CONFIG.screws_count_max_ok:
+            desc = (
+                f"Много гаек: {screw_count} (ожидалось "
+                f"{TIMING_CONFIG.screws_count_min_ok}–{TIMING_CONFIG.screws_count_max_ok})"
+            )
+        if desc is None:
+            return
+        logger.warning("Rail %s tightening anomaly: %s", rail_id, desc)
+        await self.uow.error.add(
+            Error(
+                rail_id=rail_id,
+                screw_id=None,
+                value_name="screw_count",
+                description=desc,
+                unit_of_measurement="шт",
+                value=float(screw_count),
+                min_value=float(TIMING_CONFIG.screws_count_min_ok),
+                max_value=float(TIMING_CONFIG.screws_count_max_ok),
+                is_critical=screw_count == 0 or screw_count > TIMING_CONFIG.screws_count_max_ok,
+            )
+        )
+
+    def _resolve_rail_side_from_session(self, session: RailSession) -> RailSide | None:
+        left, right = session.laser_left_count, session.laser_right_count
         diff = abs(left - right)
         if left == 0 and right == 0:
             return None
@@ -804,11 +912,71 @@ _workers_started = False
 _worker_tasks: list[asyncio.Task] = []
 
 
+async def rehydrate_in_progress_rails(state: SensorState) -> None:
+    """Восстановление единственной «парковочной» РШР после рестарта сервиса."""
+    async with get_unscoped_db() as db:
+        uow = TimeScaleDBUnitOfWork(db)
+        in_progress = await uow.rail.list_in_progress()
+        if not in_progress:
+            return
+        if len(in_progress) > 1:
+            logger.warning(
+                "Multiple IN_PROGRESS rails (%s); keeping newest parked, completing others",
+                [r.rail_id for r in in_progress],
+            )
+            parked = in_progress[0]
+            to_complete = in_progress[1:]
+            redis = RedisAPI()
+            service = SensorService(uow=uow, redis=redis)
+            service.state = state
+            for rail in to_complete:
+                screw_count = await uow.screw.count_by_rail(rail.rail_id)
+                await uow.rail.update_fields(
+                    rail_id=rail.rail_id,
+                    status=RailStatus.COMPLETED,
+                    sleepers=math.ceil(screw_count / 4) if screw_count else 0,
+                    end_time=rail.start_time,
+                )
+            in_progress = [parked]
+
+        rail = in_progress[0]
+        screw_count = await uow.screw.count_by_rail(rail.rail_id)
+        state.set_rail_screw_count(rail.rail_id, screw_count)
+
+        last_row = await uow.sensor1.last_by_rail(rail.rail_id)
+        last_mm = int(rail.length_mm or 0)
+        last_ts = rail.start_time or datetime.utcnow()
+        if last_row is not None:
+            last_mm = int(last_row.mm_along_rail)
+            last_ts = last_row.timestamp
+
+        session = RailSession(
+            rail_id=rail.rail_id,
+            start_time=rail.start_time or last_ts,
+            end_time=None,
+            last_mm_along_rail=last_mm,
+            last_timestamp=last_ts,
+            start_mm_along_rail=last_mm,
+            laser_off_at=last_ts,
+        )
+        state.park_at_post2(session)
+        post2 = state.post2_tracker()
+        post2.rail_at_post2 = rail.rail_id
+        if rail.rail_id in post2.fifo_rail_ids:
+            post2.fifo_rail_ids = [x for x in post2.fifo_rail_ids if x != rail.rail_id]
+        logger.info(
+            "Rehydrated parked rail_id=%s screws=%s",
+            rail.rail_id,
+            screw_count,
+        )
+
+
 async def start_sensor_workers() -> list[asyncio.Task]:
     global _workers_started, _worker_tasks
     if _workers_started:
         return _worker_tasks
     state = SENSOR_STATE
+    await rehydrate_in_progress_rails(state)
     _worker_tasks = [asyncio.create_task(_sensor_merged_worker(state))]
     _workers_started = True
     return _worker_tasks

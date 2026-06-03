@@ -1,6 +1,5 @@
-from sqlalchemy import update
+from sqlalchemy import update, func, select
 from typing import Sequence
-from sqlalchemy import select
 
 from infra.timescale_db.models import Screw
 from infra.timescale_db.storage.base_storage import PostgresStorage
@@ -23,3 +22,8 @@ class ScrewStorage(PostgresStorage[Screw]):
         stmt = select(Screw).where(Screw.rail_id == rail_id).order_by(Screw.serial_id.asc())
         res = await self._db.execute(stmt)
         return res.scalars().all()
+
+    async def count_by_rail(self, rail_id: int) -> int:
+        stmt = select(func.count()).select_from(Screw).where(Screw.rail_id == rail_id)
+        res = await self._db.execute(stmt)
+        return int(res.scalar_one() or 0)

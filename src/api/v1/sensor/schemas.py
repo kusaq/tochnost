@@ -24,6 +24,8 @@ class RailSession:
     start_mm_along_rail: int = 0
     laser_off_at: datetime | None = None
     post2_depart_at: datetime | None = None
+    laser_left_count: int = 0
+    laser_right_count: int = 0
 
 
 class Sensor1Values(BaseModel):

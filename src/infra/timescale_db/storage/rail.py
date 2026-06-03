@@ -79,6 +79,15 @@ class RailStorage(PostgresStorage[Rail]):
         deleted = res.scalars().all()
         return list(deleted)
 
+    async def list_in_progress(self) -> Sequence[Rail]:
+        stmt = (
+            select(Rail)
+            .where(Rail.status == RailStatus.IN_PROGRESS)
+            .order_by(Rail.start_time.desc())
+        )
+        res = await self._db.execute(stmt)
+        return res.scalars().all()
+
     async def count_completed_since(self, since: datetime) -> int:
         """
         Кол-во завершённых рельс с конца since (по end_time).
