@@ -97,9 +97,6 @@ class StreamMonitorService:
 
     def get_stats(self) -> dict[str, Any]:
         stats = self._state.get_stats()
-        last = stats.get("last_received_at")
-        if isinstance(last, datetime):
-            stats["last_received_at"] = last.isoformat()
         return stats
 
     def get_correlation_groups(self, limit: int = 50) -> list[dict[str, Any]]:

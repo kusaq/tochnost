@@ -10,6 +10,12 @@ STALE_AFTER_SEC = 30
 SENSOR_SOURCES = ("sensor1_post1", "sensor1_post2", "modbus")
 
 
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 @dataclass(slots=True)
 class StoredStreamEvent:
     id: int
@@ -66,7 +72,7 @@ class StreamMonitorState:
         if source not in self._sensor_health:
             return
         rec = self._sensor_health[source]
-        rec.last_seen_at = at
+        rec.last_seen_at = _as_utc(at)
         rec.events_count += 1
         self._sensor_recent_ts[source].append(at)
         cutoff = at.timestamp() - 60
@@ -77,7 +83,7 @@ class StreamMonitorState:
     def _is_stale(self, rec: SensorHealthRecord, now: datetime) -> bool:
         if rec.last_seen_at is None:
             return True
-        return (now - rec.last_seen_at).total_seconds() > rec.stale_after_sec
+        return (_as_utc(now) - _as_utc(rec.last_seen_at)).total_seconds() > rec.stale_after_sec
 
     def get_sensor_health(self) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -86,12 +92,12 @@ class StreamMonitorState:
             is_stale = self._is_stale(rec, now)
             gap_sec: float | None = None
             if rec.last_seen_at is not None:
-                gap_sec = round((now - rec.last_seen_at).total_seconds(), 1)
+                gap_sec = round((_as_utc(now) - _as_utc(rec.last_seen_at)).total_seconds(), 1)
             items.append(
                 {
                     "source": rec.source,
                     "label": rec.label,
-                    "last_seen_at": rec.last_seen_at.isoformat() if rec.last_seen_at else None,
+                    "last_seen_at": _as_utc(rec.last_seen_at) if rec.last_seen_at else None,
                     "events_count": rec.events_count,
                     "events_last_minute": rec.events_last_minute,
                     "is_stale": is_stale,
@@ -114,7 +120,7 @@ class StreamMonitorState:
         correlation_id: str | None = None,
         summary: str | None = None,
     ) -> StoredStreamEvent:
-        now = received_at or datetime.now(timezone.utc)
+        now = _as_utc(received_at) if received_at else datetime.now(timezone.utc)
         if correlation_id is None and rshr_id is not None:
             correlation_id = f"rshr:{rshr_id}"
 
@@ -195,7 +201,7 @@ class StreamMonitorState:
             "subscribers": len(self._subscribers),
             "by_source": dict(self._by_source),
             "by_event_type": dict(self._by_event_type),
-            "last_received_at": self._last_received_at,
+            "last_received_at": _as_utc(self._last_received_at) if self._last_received_at else None,
             "sensor_health": self.get_sensor_health(),
             "stale_after_sec": STALE_AFTER_SEC,
         }

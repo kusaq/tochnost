@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Response, status, HTTPException
 import asyncio
@@ -31,7 +31,7 @@ async def save_first_sensor_data(
         event_ts=sensor_data.timestamp,
         kind="s1",
         payload=sensor_data,
-        received_at=datetime.utcnow(),
+        received_at=datetime.now(timezone.utc),
     )
     _enqueue(state, event)
     asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
@@ -68,7 +68,7 @@ async def save_second_sensor_data(
         event_ts=sensor_data.timestamp,
         kind="s2",
         payload=sensor_data,
-        received_at=datetime.utcnow(),
+        received_at=datetime.now(timezone.utc),
     )
     _enqueue(state, event)
     asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
