@@ -6,6 +6,7 @@ from typing import Any, Literal
 class RailRead(BaseModel):
     rail_id: int = Field(description="Идентификатор рельсы")
     name: str | None = Field(default=None, description="Название рельсы")
+    scanned_name: str | None = Field(default=None, description="Считанный номер РШР")
     status: str = Field(description="Статус рельсы")
     side: str | None = Field(default=None, description="Сторона рельсы: левая/правая/центральная")
     object_name: str | None = Field(default=None, description="Название объекта")
@@ -20,6 +21,7 @@ class RailRead(BaseModel):
 
 class RailUpdate(BaseModel):
     name: str | None = Field(default=None, description="Название рельсы")
+    scanned_name: str | None = Field(default=None, max_length=255, description="Считанный номер РШР")
     status: str | None = Field(default=None, description="Статус рельсы")
     side: str | None = Field(default=None, description="Сторона рельсы: левая/правая/центральная")
     object_name: str | None = Field(default=None, description="Название объекта")

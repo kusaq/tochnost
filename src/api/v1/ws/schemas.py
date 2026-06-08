@@ -50,6 +50,7 @@ class DashboardStagesEnvelope(BaseModel):
 class DashboardStatusData(BaseModel):
     rail_id: int = Field(description="Идентификатор активной рельсы")
     name: str | None = Field(default=None, description="Имя рельсы")
+    scanned_name: str | None = Field(default=None, description="Считанный номер РШР")
     status: str = Field(description="Статус рельсы (значение enum, строка)")
     object_name: str | None = Field(default=None, description="Название объекта")
     fastening_type: str | None = Field(default=None, description="Тип скрепления")

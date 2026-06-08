@@ -22,6 +22,9 @@ class Rail(Base, CreateTimestampMixin):
 
     rail_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scanned_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, comment="Считанный номер РШР (OCR/нейросеть)"
+    )
     status: Mapped[RailStatus] = mapped_column(
         Enum(RailStatus, name="rail_status", native_enum=False),
         nullable=False,

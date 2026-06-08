@@ -49,7 +49,13 @@ class RailService(BaseService):
         return RailsListResponse(items=[RailRead.model_validate(i) for i in items], total=total)
 
     async def update_rail(self, rail_id: int, payload: RailUpdate) -> RailRead | None:
-        updated = await self.uow.rail.update_fields(rail_id, **payload.model_dump(exclude_unset=True))
+        fields = payload.model_dump(exclude_unset=True)
+        if "scanned_name" in fields:
+            raw = fields["scanned_name"]
+            if raw is not None:
+                stripped = raw.strip()
+                fields["scanned_name"] = stripped if stripped else None
+        updated = await self.uow.rail.update_fields(rail_id, **fields)
         return RailRead.model_validate(updated) if updated else None
 
     async def delete_rail(self, rail_id: int) -> None:
@@ -489,6 +495,7 @@ class RailService(BaseService):
         info_rows = [
             ("Rail ID", rail.rail_id),
             ("Название", rail.name or ""),
+            ("Считанный номер", rail.scanned_name or ""),
             ("Статус", rail.status.value if getattr(rail, "status", None) is not None else ""),
             ("Сторона", rail.side.value if getattr(rail, "side", None) is not None else ""),
             ("Объект", rail.object_name or ""),

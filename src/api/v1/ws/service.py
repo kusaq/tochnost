@@ -99,6 +99,7 @@ async def run_push_status(ws: WebSocket) -> None:
             message["data"] = {
                 "rail_id": rail.rail_id,
                 "name": rail.name,
+                "scanned_name": rail.scanned_name,
                 "status": rail.status.value,
                 "object_name": rail.object_name,
                 "fastening_type": rail.fastening_type,
