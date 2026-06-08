@@ -10,6 +10,7 @@ from api.v1 import (
     threshold_router,
     ws_router,
     stream_monitor_router,
+    camera_router,
 )
 
 
@@ -22,6 +23,7 @@ v1_router.include_router(screw_router)
 v1_router.include_router(threshold_router)
 v1_router.include_router(ws_router)
 v1_router.include_router(stream_monitor_router)
+v1_router.include_router(camera_router)
 
 __all__ = [
     "v1_router",

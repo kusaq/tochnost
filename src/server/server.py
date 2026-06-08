@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from api.v1.sensor.service import start_sensor_workers, stop_sensor_workers
+from api.v1.camera.service import start_camera_worker, stop_camera_worker
 from core.config import settings
 from core.logging_config import setup_logging
 from server.middlewares.auth import SlidingSessionMiddleware
@@ -40,8 +41,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     )
     # start background workers for sensor ingestion
     _app.state.sensor_workers = await start_sensor_workers()
+    _app.state.camera_worker = await start_camera_worker()
     yield
     # stop background workers
+    await stop_camera_worker()
     await stop_sensor_workers()
 
 

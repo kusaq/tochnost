@@ -6,6 +6,7 @@ from api.v1.screw.router import router as screw_router
 from api.v1.threshold.router import router as threshold_router
 from api.v1.ws.router import router as ws_router
 from api.v1.stream_monitor.router import router as stream_monitor_router
+from api.v1.camera.router import router as camera_router
 
 __all__ = [
     "auth_router",
@@ -16,4 +17,5 @@ __all__ = [
     "threshold_router",
     "ws_router",
     "stream_monitor_router",
+    "camera_router",
 ]
