@@ -8,6 +8,8 @@ from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read, Sen
 from api.v1.sensor.state import SensorStateDep, MergedSensorEvent
 from api.v1.base.dependencies import PaginationDep
 from api.v1.stream_monitor.service import stream_monitor
+from api.v1.ws.service import cache_dashboard_env_stats
+from infra.redis.dependencies import RedisDep
 
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
 
@@ -63,7 +65,13 @@ async def reset_sensor_state(
 async def save_second_sensor_data(
     sensor_data: Sensor2Create,
     state: SensorStateDep,
+    redis: RedisDep,
 ) -> Response:
+    await cache_dashboard_env_stats(
+        redis,
+        sensor_data.values.temperature,
+        sensor_data.values.humidity,
+    )
     event = MergedSensorEvent(
         event_ts=sensor_data.timestamp,
         kind="s2",

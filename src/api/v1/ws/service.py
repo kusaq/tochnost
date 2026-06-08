@@ -11,6 +11,16 @@ from infra.timescale_db.ts_db import get_unscoped_db
 from infra.timescale_db.uow import TimeScaleDBUnitOfWork
 from infra.redis.redis_api import RedisAPI
 
+DASHBOARD_TEMP_KEY = "dashboard:stats:temperature_current"
+DASHBOARD_HUM_KEY = "dashboard:stats:humidity_current"
+DASHBOARD_ENV_TTL_SEC = 300
+
+
+async def cache_dashboard_env_stats(redis: RedisAPI, temperature: float, humidity: float) -> None:
+    """Кэширует T/H для дашборда независимо от FSM рельсы и воркера датчиков."""
+    await redis.set(DASHBOARD_TEMP_KEY, temperature, expire=DASHBOARD_ENV_TTL_SEC)
+    await redis.set(DASHBOARD_HUM_KEY, humidity, expire=DASHBOARD_ENV_TTL_SEC)
+
 
 async def run_sender(ws: WebSocket, redis: RedisAPI, channels_to_sub: list[str]) -> None:
     async for ch, data in redis.iter_pubsub_multi(channels_to_sub):
@@ -35,8 +45,8 @@ async def run_push_stats(ws: WebSocket, redis: RedisAPI) -> None:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             hour_ago = now - timedelta(hours=1)
 
-            temp = await redis.get("dashboard:stats:temperature_current")
-            hum = await redis.get("dashboard:stats:humidity_current")
+            temp = await redis.get(DASHBOARD_TEMP_KEY)
+            hum = await redis.get(DASHBOARD_HUM_KEY)
             temperature = temp if temp is not None else "N/A"
             humidity = hum if hum is not None else "N/A"
 

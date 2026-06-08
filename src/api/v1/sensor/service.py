@@ -23,6 +23,7 @@ from rshr_core.config import RshrTimingConfig
 from rshr_core.rshr_length import segment_length_mm
 from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
 from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
+from api.v1.ws.service import cache_dashboard_env_stats
 
 logger = logging.getLogger(__name__)
 TIMING_CONFIG = RshrTimingConfig.from_env()
@@ -277,8 +278,11 @@ class SensorService(BaseService):
         return self.state.find_rail_session(rail_id)
 
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
-        await self.redis.set("dashboard:stats:temperature_current", sensor2_data.values.temperature, expire=300)
-        await self.redis.set("dashboard:stats:humidity_current", sensor2_data.values.humidity, expire=300)
+        await cache_dashboard_env_stats(
+            self.redis,
+            sensor2_data.values.temperature,
+            sensor2_data.values.humidity,
+        )
 
         rail_id = self._modbus_target_rail_id(for_modbus=True)
         if rail_id is None:
