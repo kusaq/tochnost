@@ -15,6 +15,7 @@ from api.v1.rail.schemas import (
     RailSensorSeries,
     DeleteRailsRequest,
     DeleteRailsResponse,
+    RejectRailResponse,
 )
 from api.v1.auth.dependencies import CurrentUserDep
 
@@ -85,7 +86,7 @@ async def delete_rails(
 
 @router.post(
     "/{rail_id}/reject",
-    response_model=RailRead,
+    response_model=RejectRailResponse,
     summary="Отбраковка рельсы",
     description="Переводит рельсу в статус «Брак» и снимает её с конвейера.",
     responses={

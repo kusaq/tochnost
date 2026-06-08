@@ -1,7 +1,10 @@
 import json
+import logging
 
 from api.v1.sensor.state import SENSOR_STATE
 from infra.redis.redis_api import RedisAPI
+
+logger = logging.getLogger(__name__)
 
 
 async def detach_rail_from_sensor_state(rail_id: int, redis: RedisAPI) -> None:
@@ -26,7 +29,10 @@ async def detach_rail_from_sensor_state(rail_id: int, redis: RedisAPI) -> None:
         post2.rail_at_post2 = None
     state.clear_rail_screw_count(rail_id)
 
-    await redis.publish(
-        "dashboard:stages",
-        json.dumps({}, ensure_ascii=False),
-    )
+    try:
+        await redis.publish(
+            "dashboard:stages",
+            json.dumps({}, ensure_ascii=False),
+        )
+    except Exception:
+        logger.exception("Failed to publish dashboard:stages after detaching rail %s", rail_id)

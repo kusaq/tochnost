@@ -23,6 +23,7 @@ from rshr_core.config import RshrTimingConfig
 from rshr_core.rshr_length import segment_length_mm
 from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
 from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
+from api.v1.rail.fsm import detach_rail_from_sensor_state
 from api.v1.ws.service import cache_dashboard_env_stats
 
 logger = logging.getLogger(__name__)
@@ -707,8 +708,9 @@ class SensorService(BaseService):
         active = self.state.get_active_rail()
         if active is None:
             return
-        self.state.post2_tracker().remove_from_fifo(active.rail_id)
-        await self.uow.rail.delete_by_id(active.rail_id)
+        rail_id = active.rail_id
+        await detach_rail_from_sensor_state(rail_id, self.redis)
+        await self.uow.rail.delete_by_id(rail_id)
         self.state.clear_active()
         self.state.reset_resistance_stats()
         self.state.reset_temperature_stats()
@@ -741,8 +743,8 @@ class SensorService(BaseService):
                 summary=f"РШР #{rail_id} отброшен: длина {length_mm} мм < 15 м",
                 payload={"reason": "too_short", "length_mm": length_mm, "discarded": True},
             )
+            await detach_rail_from_sensor_state(rail_id, self.redis)
             await self.uow.rail.delete_by_id(rail_id)
-            self.state.clear_rail_screw_count(rail_id)
             await self._publish_stages_empty()
             return
 
@@ -889,6 +891,8 @@ class SensorService(BaseService):
         )
 
     async def list_sensor1_by_rail(self, rail_id: int, *, limit: int = 20, offset: int = 0):
+        if await self.uow.rail.get_by_id(rail_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
         return await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=limit, offset=offset)
 
     async def _record_tightening_count_anomaly(

@@ -20,10 +20,16 @@ from api.v1.rail.schemas import (
     RejectRailResponse,
 )
 from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
-from infra.timescale_db.models import ScrewStatus, RailStatus
+from infra.timescale_db.models import ScrewStatus, RailStatus, Rail
 
 
 class RailService(BaseService):
+    async def _get_active_rail_or_404(self, rail_id: int) -> Rail:
+        rail = await self.uow.rail.get_by_id(rail_id)
+        if rail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        return rail
+
     async def list_rails(
         self,
         *,
@@ -59,22 +65,24 @@ class RailService(BaseService):
         return RailRead.model_validate(updated) if updated else None
 
     async def delete_rail(self, rail_id: int) -> None:
-        rail = await self.uow.rail.get_by_id(rail_id)
-        if rail is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        await self._get_active_rail_or_404(rail_id)
         await detach_rail_from_sensor_state(rail_id, self.redis)
-        await self.uow.rail.delete_by_id(rail_id)
+        if await self.uow.rail.delete_by_id(rail_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
 
     async def delete_rails(self, rail_ids: list[int]) -> DeleteRailsResponse:
+        unique_ids = list(dict.fromkeys(rail_ids))
         not_found: list[int] = []
-        for rail_id in rail_ids:
+        found_ids: list[int] = []
+
+        for rail_id in unique_ids:
             rail = await self.uow.rail.get_by_id(rail_id)
             if rail is None:
                 not_found.append(rail_id)
-            else:
-                await detach_rail_from_sensor_state(rail_id, self.redis)
+                continue
+            found_ids.append(rail_id)
+            await detach_rail_from_sensor_state(rail_id, self.redis)
 
-        found_ids = [rid for rid in rail_ids if rid not in not_found]
         deleted_ids = await self.uow.rail.delete_by_ids(found_ids) if found_ids else []
         deleted = len(deleted_ids)
         if deleted == 0:
@@ -82,9 +90,7 @@ class RailService(BaseService):
         return DeleteRailsResponse(deleted=deleted, not_found=not_found)
 
     async def reject_rail(self, rail_id: int) -> RejectRailResponse:
-        rail = await self.uow.rail.get_by_id(rail_id)
-        if rail is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        rail = await self._get_active_rail_or_404(rail_id)
         if rail.status != RailStatus.IN_PROGRESS:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -102,7 +108,7 @@ class RailService(BaseService):
         return RejectRailResponse(deleted=1, rail_id=rail_id)
 
     async def get_aggregated_metrics(self, rail_id: int) -> list[RailMetricRead]:
-        # Получаем все Sensor1 и Sensor2 по рельсе
+        await self._get_active_rail_or_404(rail_id)
         s1_list = await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=100000, offset=0)
         s2_list = await self.uow.sensor2.list_by_rail(rail_id=rail_id)
 
@@ -447,9 +453,7 @@ class RailService(BaseService):
             metric_names: Список названий метрик для экспорта. Если None, экспортируются все метрики.
         """
         # Информация о рельсе
-        rail = await self.uow.rail.get_by_id(rail_id)
-        if rail is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        rail = await self._get_active_rail_or_404(rail_id)
 
         screws = await self.uow.screw.list_by_rail(rail_id)
         tightened_count = sum(1 for s in screws if s.status == ScrewStatus.COMPLETED)
@@ -606,6 +610,9 @@ class RailService(BaseService):
         result: list[RailSensorSeries] = []
 
         for rail_id in payload.rail_ids:
+            if await self.uow.rail.get_by_id(rail_id) is None:
+                continue
+
             if payload.source == "sensor1":
                 rows = await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=100000, offset=0)
             else:

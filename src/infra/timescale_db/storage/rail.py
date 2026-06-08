@@ -1,6 +1,6 @@
 from typing import Sequence
 
-from sqlalchemy import select, func, update, delete
+from sqlalchemy import select, func, update
 
 from infra.timescale_db.models import Rail, RailStatus
 from infra.timescale_db.storage.base_storage import PostgresStorage
@@ -10,11 +10,24 @@ from datetime import datetime, timezone
 class RailStorage(PostgresStorage[Rail]):
     model_cls = Rail
 
-    async def get_by_id(self, rail_id: int) -> Rail | None:
-        return await self._db.get(Rail, rail_id)
+    @staticmethod
+    def _utc_now_naive() -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _active_filter():
+        return Rail.deleted_at.is_(None)
+
+    async def get_by_id(self, rail_id: int, *, include_deleted: bool = False) -> Rail | None:
+        rail = await self._db.get(Rail, rail_id)
+        if rail is None:
+            return None
+        if not include_deleted and rail.deleted_at is not None:
+            return None
+        return rail
 
     async def get_by_name(self, name: str) -> Rail | None:
-        stmt = select(Rail).where(Rail.name == name)
+        stmt = select(Rail).where(Rail.name == name, self._active_filter())
         result = await self._db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -30,8 +43,8 @@ class RailStorage(PostgresStorage[Rail]):
         sort_by: str = "rail_id",
         order_desc: bool = True,
     ) -> tuple[Sequence[Rail], int]:
-        stmt = select(Rail)
-        count_stmt = select(func.count()).select_from(Rail)
+        stmt = select(Rail).where(self._active_filter())
+        count_stmt = select(func.count()).select_from(Rail).where(self._active_filter())
         if name:
             like = f"%{name}%"
             stmt = stmt.where(Rail.name.ilike(like))
@@ -45,7 +58,6 @@ class RailStorage(PostgresStorage[Rail]):
         if object_name:
             stmt = stmt.where(Rail.object_name == object_name)
             count_stmt = count_stmt.where(Rail.object_name == object_name)
-        # Безопасный выбор поля сортировки
         sort_map = {
             "rail_id": Rail.rail_id,
             "start_time": Rail.start_time,
@@ -62,7 +74,7 @@ class RailStorage(PostgresStorage[Rail]):
     async def update_fields(self, rail_id: int, **fields) -> Rail | None:
         stmt = (
             update(Rail)
-            .where(Rail.rail_id == rail_id)
+            .where(Rail.rail_id == rail_id, self._active_filter())
             .values(**fields)
             .returning(Rail)
         )
@@ -70,32 +82,38 @@ class RailStorage(PostgresStorage[Rail]):
         return res.scalar_one_or_none()
 
     async def delete_by_id(self, rail_id: int) -> int | None:
-        stmt = delete(Rail).where(Rail.rail_id == rail_id).returning(Rail.rail_id)
+        """Мягкое удаление: проставляет deleted_at, связанные строки не трогает."""
+        stmt = (
+            update(Rail)
+            .where(Rail.rail_id == rail_id, self._active_filter())
+            .values(deleted_at=self._utc_now_naive())
+            .returning(Rail.rail_id)
+        )
         res = await self._db.execute(stmt)
         return res.scalar_one_or_none()
 
     async def delete_by_ids(self, rail_ids: list[int]) -> list[int]:
         if not rail_ids:
             return []
-        stmt = delete(Rail).where(Rail.rail_id.in_(rail_ids)).returning(Rail.rail_id)
+        stmt = (
+            update(Rail)
+            .where(Rail.rail_id.in_(rail_ids), self._active_filter())
+            .values(deleted_at=self._utc_now_naive())
+            .returning(Rail.rail_id)
+        )
         res = await self._db.execute(stmt)
-        deleted = res.scalars().all()
-        return list(deleted)
+        return list(res.scalars().all())
 
     async def list_in_progress(self) -> Sequence[Rail]:
         stmt = (
             select(Rail)
-            .where(Rail.status == RailStatus.IN_PROGRESS)
+            .where(Rail.status == RailStatus.IN_PROGRESS, self._active_filter())
             .order_by(Rail.start_time.desc())
         )
         res = await self._db.execute(stmt)
         return res.scalars().all()
 
     async def count_completed_since(self, since: datetime) -> int:
-        """
-        Кол-во завершённых рельс с конца since (по end_time).
-        """
-        # Приводим к наивному UTC, так как колонка end_time = TIMESTAMP WITHOUT TIME ZONE
         since_param = since
         if since.tzinfo is not None:
             try:
@@ -108,6 +126,7 @@ class RailStorage(PostgresStorage[Rail]):
             .where(Rail.status == RailStatus.COMPLETED)
             .where(Rail.end_time.is_not(None))
             .where(Rail.end_time >= since_param)
+            .where(self._active_filter())
         )
         res = await self._db.execute(stmt)
         return int(res.scalar_one() or 0)

@@ -96,6 +96,11 @@ async def run_push_status(ws: WebSocket) -> None:
                 uow = TimeScaleDBUnitOfWork(db)
                 rail = await uow.rail.get_by_id(active.rail_id)
 
+            if rail is None:
+                message["data"] = {}
+                await ws.send_text(json.dumps(message, ensure_ascii=False))
+                continue
+
             message["data"] = {
                 "rail_id": rail.rail_id,
                 "name": rail.name,

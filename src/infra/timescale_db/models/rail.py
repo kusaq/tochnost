@@ -40,6 +40,10 @@ class Rail(Base, CreateTimestampMixin):
     sleepers: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start_time: Mapped[datetime | None] = mapped_column(nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        nullable=True,
+        comment="Метка мягкого удаления; NULL — запись активна",
+    )
     length_mm: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="Длина РШР, мм")
     resistance_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
     resistance_min: Mapped[float | None] = mapped_column(Float, nullable=True)
