@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, Response, Cookie
 from fastapi.security.http import HTTPAuthorizationCredentials
 
 from api.v1.auth.dependencies import AuthServiceDep, CurrentUserDep, authentication_schema
-from api.v1.auth.utils import get_token_from_request
-from api.v1.auth.schemas import LoginRequest, TokenResponse
+from api.v1.auth.utils import get_token_from_request, set_auth_cookie, delete_auth_cookie
+from api.v1.auth.schemas import LoginRequest, TokenResponse, UserData
 
 router = APIRouter(tags=["Authentication"])
 
@@ -17,15 +17,13 @@ async def login(request: LoginRequest, auth_service: AuthServiceDep, response: R
     """
     data = await auth_service.login(request)
     token = data.get("access_token")
-    response.set_cookie(
-        key="Authorization",
-        value=f"Bearer {token}",
-        httponly=True,
-        secure=True,
-        samesite="none",
-        path="/",
-    )
+    set_auth_cookie(response, token)
     return TokenResponse(expires_in=data.get("expires_in"))
+
+
+@router.get("/auth/me", response_model=UserData)
+async def me(current_user: CurrentUserDep):
+    return current_user
 
 
 @router.post("/logout", response_model=dict)
@@ -43,8 +41,5 @@ async def logout(
     if token:
         await auth_service.logout(token)
 
-    response.delete_cookie(
-        key="Authorization",
-        path="/",
-    )
+    delete_auth_cookie(response)
     return {"message": "ok"}

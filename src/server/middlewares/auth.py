@@ -6,7 +6,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from core.config import settings
-from api.v1.auth.utils import extract_token_from_value
+from api.v1.auth.utils import extract_token_from_value, set_auth_cookie
 from api.v1.auth.service import AuthService
 
 
@@ -42,13 +42,6 @@ class SlidingSessionMiddleware(BaseHTTPMiddleware):
         response: Response = await call_next(request)
 
         if new_token:
-            response.set_cookie(
-                key="Authorization",
-                value=f"Bearer {new_token}",
-                httponly=True,
-                secure=True,
-                samesite="none",
-                path="/",
-            )
+            set_auth_cookie(response, new_token)
 
         return response

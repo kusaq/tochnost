@@ -1,5 +1,9 @@
 from urllib.parse import unquote_plus
+
+from fastapi import Response
 from fastapi.security.http import HTTPAuthorizationCredentials
+
+from core.config import settings
 
 
 def extract_token_from_value(value: str | None) -> str | None:
@@ -26,5 +30,23 @@ def get_token_from_request(
         if token:
             return token
     return None
+
+
+def get_auth_cookie_kwargs() -> dict:
+    if settings.DEBUG:
+        return {"httponly": True, "secure": False, "samesite": "lax", "path": "/"}
+    return {"httponly": True, "secure": True, "samesite": "none", "path": "/"}
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key="Authorization",
+        value=f"Bearer {token}",
+        **get_auth_cookie_kwargs(),
+    )
+
+
+def delete_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key="Authorization", path="/")
 
 

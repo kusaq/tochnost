@@ -22,6 +22,7 @@ from api.v1.sensor.tightening import has_moment_activity, all_torque_zero, MOMEN
 from rshr_core.config import RshrTimingConfig
 from rshr_core.rshr_length import segment_length_mm
 from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
+from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
 
 logger = logging.getLogger(__name__)
 TIMING_CONFIG = RshrTimingConfig.from_env()
@@ -282,6 +283,12 @@ class SensorService(BaseService):
         rail_id = self._modbus_target_rail_id(for_modbus=True)
         if rail_id is None:
             self.state.mark_modbus_skipped_no_post2()
+            await emit_pipeline_event(
+                "modbus_skipped",
+                event_ts=sensor2_data.timestamp,
+                summary="Modbus: нет РШР на посту 2",
+                payload={"reason": "no_post2_rail"},
+            )
             return
         session = self._rail_session_for_modbus(rail_id)
         if session is None:
@@ -317,6 +324,13 @@ class SensorService(BaseService):
                 self.state.bump_tightening_cycle(values)
         elif has_moment_activity(values):
             self.state.start_tightening_cycle(rail_id, session.last_mm_along_rail, values)
+            await emit_pipeline_event(
+                "tightening_started",
+                rshr_id=rail_id,
+                event_ts=sensor2_data.timestamp,
+                summary=f"Начало закрутки РШР #{rail_id}",
+                payload={"mm_along_rail": session.last_mm_along_rail},
+            )
         return
 
     async def _finalize_tightening_cycle(self, ts: datetime, session: RailSession) -> None:
@@ -380,6 +394,13 @@ class SensorService(BaseService):
                 )
         if sensors:
             await self.uow.sensor2.add_many(sensors)
+        await emit_pipeline_event(
+            "tightening_completed",
+            rshr_id=rail_id,
+            event_ts=ts,
+            summary=f"Закрутка завершена: {len(sensors)} гаек, РШР #{rail_id}",
+            payload={"screw_count": len(sensors), "errors": len(errors_to_add)},
+        )
 
     async def add_screw(
         self,
@@ -550,9 +571,27 @@ class SensorService(BaseService):
                     "post2 segment ignored: empty fifo (unmatched=%s)",
                     post2.unmatched_segments,
                 )
+                await emit_pipeline_event(
+                    "post2_unmatched",
+                    event_ts=ts,
+                    summary="Пост 2: лазер без РШР в очереди",
+                    payload={"unmatched_segments": post2.unmatched_segments},
+                )
             else:
                 departed_id = post2.on_post2_segment_start()
                 self.state.set_post2_laser_was_on(True)
+                recognized_id = post2.rail_at_post2
+                await emit_pipeline_event(
+                    "post2_recognized",
+                    rshr_id=recognized_id,
+                    event_ts=ts,
+                    summary=f"Пост 2: распознан проход РШР #{recognized_id}",
+                    payload={
+                        "departed_rail_id": departed_id,
+                        "fifo_remaining": list(post2.fifo_rail_ids),
+                        "segment_index": post2.post2_segment_index,
+                    },
+                )
                 if departed_id is not None:
                     await self._depart_rail_from_post2(departed_id, ts)
         elif not on_rail and was_on:
@@ -573,6 +612,13 @@ class SensorService(BaseService):
         if session is None:
             return
         session.post2_depart_at = ts
+        await emit_pipeline_event(
+            "rshr_departed_post2",
+            rshr_id=rail_id,
+            event_ts=ts,
+            summary=f"РШР #{rail_id} ушёл с поста 2",
+            payload={"post2_depart_at": ts.isoformat()},
+        )
         if self.state.is_tightening_active() and self.state.tightening_rail_id() == rail_id:
             await self._finalize_tightening_cycle(ts, session)
         await self.finalize_rail(session)
@@ -616,6 +662,13 @@ class SensorService(BaseService):
                 active.rail_id,
             )
             self.state.post2_tracker().remove_from_fifo(active.rail_id)
+            await emit_pipeline_event(
+                "rshr_discarded",
+                rshr_id=active.rail_id,
+                event_ts=active.laser_off_at,
+                summary=f"РШР #{active.rail_id} отброшен: долгий проход поста 1",
+                payload={"reason": "post1_pass_too_long", "pass_sec": pass_sec},
+            )
             await self.discard_active_rail()
             return
         if self.state.is_tightening_active() and self.state.tightening_rail_id() == active.rail_id:
@@ -632,6 +685,17 @@ class SensorService(BaseService):
         self.state.reset_temperature_stats()
         self.state.reset_gauge_stats()
         self.state.reset_laser_counts()
+        await emit_pipeline_event(
+            "rshr_parked_post1",
+            rshr_id=active.rail_id,
+            event_ts=active.laser_off_at or active.last_timestamp,
+            summary=f"РШР #{active.rail_id} снят с поста 1, ожидает пост 2",
+            payload={
+                "start_mm": active.start_mm_along_rail,
+                "end_mm": active.last_mm_along_rail,
+                "fifo": list(self.state.post2_tracker().fifo_rail_ids),
+            },
+        )
         await self._publish_stages_empty()
 
     async def discard_active_rail(self) -> None:
@@ -666,6 +730,13 @@ class SensorService(BaseService):
 
         length_mm = segment_length_mm(session.start_mm_along_rail, session.last_mm_along_rail)
         if length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
+            await emit_pipeline_event(
+                "rshr_discarded",
+                rshr_id=rail_id,
+                event_ts=session.last_timestamp,
+                summary=f"РШР #{rail_id} отброшен: длина {length_mm} мм < 15 м",
+                payload={"reason": "too_short", "length_mm": length_mm, "discarded": True},
+            )
             await self.uow.rail.delete_by_id(rail_id)
             self.state.clear_rail_screw_count(rail_id)
             await self._publish_stages_empty()
@@ -737,6 +808,18 @@ class SensorService(BaseService):
         self.state.reset_gauge_stats()
         self.state.reset_laser_counts()
         self.state.reset_tightening_cycle()
+        await emit_pipeline_event(
+            "rshr_closed",
+            rshr_id=rail_id,
+            event_ts=session.end_time or session.last_timestamp,
+            summary=f"РШР #{rail_id} закрыт: {length_mm} мм, {screw_count} гаек",
+            payload={
+                "length_mm": length_mm,
+                "screw_count": screw_count,
+                "sleepers": sleepers_value,
+                "side": update_kwargs.get("side").value if update_kwargs.get("side") else None,
+            },
+        )
         await self._publish_stages_empty()
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
@@ -765,6 +848,17 @@ class SensorService(BaseService):
             )
         )
         self.state.post2_tracker().enqueue_opened_rail(rail.rail_id)
+        await emit_pipeline_event(
+            "rshr_opened",
+            rshr_id=rail.rail_id,
+            event_ts=data.timestamp,
+            summary=f"Открыт РШР #{rail.rail_id} на посту 1",
+            payload={
+                "start_mm": start_mm,
+                "laser_left": bool(data.values.laser_on_rail_left),
+                "laser_right": bool(data.values.laser_on_rail_right),
+            },
+        )
         # Первичное отслеживание диапазонов для метрик Sensor1
         active = self.state.get_active_rail()
         current_mm = int(data.values.mm_along_rail)
@@ -899,9 +993,22 @@ async def _sensor_merged_worker(state: SensorState) -> None:
                 if policy == LatePacketPolicy.STALE:
                     state.mark_packet_stale()
                     logger.warning("Dropping stale packet kind=%s event_ts=%s", ev.kind, ev.event_ts)
+                    await emit_pipeline_event(
+                        "packet_stale",
+                        event_ts=ev.event_ts,
+                        summary=f"Устаревший пакет {ev.kind}",
+                        payload={"kind": ev.kind, "event_ts": ev.event_ts.isoformat()},
+                    )
                     continue
                 if policy == LatePacketPolicy.LATE_APPEND:
                     state.mark_packet_late_append()
+                    await emit_pipeline_event(
+                        "packet_late",
+                        rshr_id=closed_rail_id,
+                        event_ts=ev.event_ts,
+                        summary=f"Поздний пакет {ev.kind} для РШР #{closed_rail_id}",
+                        payload={"kind": ev.kind},
+                    )
 
                 await _process_merged_event(state, ev)
         finally:

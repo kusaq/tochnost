@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 class RailStorage(PostgresStorage[Rail]):
     model_cls = Rail
 
+    async def get_by_id(self, rail_id: int) -> Rail | None:
+        return await self._db.get(Rail, rail_id)
+
     async def get_by_name(self, name: str) -> Rail | None:
         stmt = select(Rail).where(Rail.name == name)
         result = await self._db.execute(stmt)

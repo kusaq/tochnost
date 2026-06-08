@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 
 from fastapi import HTTPException, status
@@ -7,6 +7,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import PatternFill
 
 from api.v1.base.service import BaseService
+from api.v1.rail.fsm import detach_rail_from_sensor_state
 from api.v1.rail.schemas import (
     RailsListResponse,
     RailUpdate,
@@ -15,8 +16,11 @@ from api.v1.rail.schemas import (
     SensorSeriesRequest,
     RailSensorSeries,
     SensorPoint,
+    DeleteRailsResponse,
+    RejectRailResponse,
 )
-from infra.timescale_db.models import ScrewStatus
+from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
+from infra.timescale_db.models import ScrewStatus, RailStatus
 
 
 class RailService(BaseService):
@@ -49,15 +53,47 @@ class RailService(BaseService):
         return RailRead.model_validate(updated) if updated else None
 
     async def delete_rail(self, rail_id: int) -> None:
-        deleted_id = await self.uow.rail.delete_by_id(rail_id)
-        if deleted_id is None:
+        rail = await self.uow.rail.get_by_id(rail_id)
+        if rail is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        await detach_rail_from_sensor_state(rail_id, self.redis)
+        await self.uow.rail.delete_by_id(rail_id)
 
-    async def delete_rails(self, rail_ids: list[int]) -> int:
-        deleted_ids = await self.uow.rail.delete_by_ids(rail_ids)
-        if not deleted_ids:
+    async def delete_rails(self, rail_ids: list[int]) -> DeleteRailsResponse:
+        not_found: list[int] = []
+        for rail_id in rail_ids:
+            rail = await self.uow.rail.get_by_id(rail_id)
+            if rail is None:
+                not_found.append(rail_id)
+            else:
+                await detach_rail_from_sensor_state(rail_id, self.redis)
+
+        found_ids = [rid for rid in rail_ids if rid not in not_found]
+        deleted_ids = await self.uow.rail.delete_by_ids(found_ids) if found_ids else []
+        deleted = len(deleted_ids)
+        if deleted == 0:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rails not found")
-        return len(deleted_ids)
+        return DeleteRailsResponse(deleted=deleted, not_found=not_found)
+
+    async def reject_rail(self, rail_id: int) -> RejectRailResponse:
+        rail = await self.uow.rail.get_by_id(rail_id)
+        if rail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rail not found")
+        if rail.status != RailStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only in-progress rails can be rejected",
+            )
+        await detach_rail_from_sensor_state(rail_id, self.redis)
+        await emit_pipeline_event(
+            "rshr_discarded",
+            rshr_id=rail_id,
+            event_ts=datetime.now(timezone.utc),
+            summary=f"РШР #{rail_id} отбракована вручную",
+            payload={"reason": "manual_reject", "discarded": True},
+        )
+        await self.uow.rail.delete_by_id(rail_id)
+        return RejectRailResponse(deleted=1, rail_id=rail_id)
 
     async def get_aggregated_metrics(self, rail_id: int) -> list[RailMetricRead]:
         # Получаем все Sensor1 и Sensor2 по рельсе

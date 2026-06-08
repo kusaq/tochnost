@@ -7,6 +7,7 @@ from api.v1.sensor.dependencies import SensorServiceDep
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read, SensorStateResetRequest
 from api.v1.sensor.state import SensorStateDep, MergedSensorEvent
 from api.v1.base.dependencies import PaginationDep
+from api.v1.stream_monitor.service import stream_monitor
 
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
 
@@ -26,15 +27,14 @@ async def save_first_sensor_data(
     sensor_data: Sensor1Create,
     state: SensorStateDep,
 ) -> Response:
-    _enqueue(
-        state,
-        MergedSensorEvent(
-            event_ts=sensor_data.timestamp,
-            kind="s1",
-            payload=sensor_data,
-            received_at=datetime.utcnow(),
-        ),
+    event = MergedSensorEvent(
+        event_ts=sensor_data.timestamp,
+        kind="s1",
+        payload=sensor_data,
+        received_at=datetime.utcnow(),
     )
+    _enqueue(state, event)
+    asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -64,15 +64,14 @@ async def save_second_sensor_data(
     sensor_data: Sensor2Create,
     state: SensorStateDep,
 ) -> Response:
-    _enqueue(
-        state,
-        MergedSensorEvent(
-            event_ts=sensor_data.timestamp,
-            kind="s2",
-            payload=sensor_data,
-            received_at=datetime.utcnow(),
-        ),
+    event = MergedSensorEvent(
+        event_ts=sensor_data.timestamp,
+        kind="s2",
+        payload=sensor_data,
+        received_at=datetime.utcnow(),
     )
+    _enqueue(state, event)
+    asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 

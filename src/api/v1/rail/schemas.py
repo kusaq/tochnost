@@ -34,6 +34,20 @@ class RailsListResponse(BaseModel):
     total: int = Field(ge=0, description="Общее количество записей")
 
 
+class DeleteRailsRequest(BaseModel):
+    rail_ids: list[int] = Field(description="Список идентификаторов рельс для удаления")
+
+
+class DeleteRailsResponse(BaseModel):
+    deleted: int = Field(ge=0, description="Количество удалённых записей")
+    not_found: list[int] = Field(default_factory=list, description="Идентификаторы не найденных рельс")
+
+
+class RejectRailResponse(BaseModel):
+    deleted: int = Field(ge=0, description="Количество удалённых записей (всегда 1 при успехе)")
+    rail_id: int = Field(description="Идентификатор отбракованной рельсы")
+
+
 class RailMetricRead(BaseModel):
     rail_id: int = Field(description="Идентификатор рельсы")
     name: str = Field(description="Название метрики")

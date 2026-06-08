@@ -1,7 +1,7 @@
 from typing import Literal
 import io
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
 from fastapi.responses import StreamingResponse
 
 from api.v1.base.dependencies import PaginationDep
@@ -13,6 +13,8 @@ from api.v1.rail.schemas import (
     RailMetricRead,
     SensorSeriesRequest,
     RailSensorSeries,
+    DeleteRailsRequest,
+    DeleteRailsResponse,
 )
 from api.v1.auth.dependencies import CurrentUserDep
 
@@ -66,7 +68,7 @@ async def update_rail(
 
 @router.delete(
     "",
-    response_model=dict,
+    response_model=DeleteRailsResponse,
     summary="Массовое удаление рельс",
     description="Удаляет рельсы по списку идентификаторов. Возвращает количество удалённых записей.",
     responses={
@@ -74,12 +76,29 @@ async def update_rail(
     },
 )
 async def delete_rails(
-    rail_ids: list[int],
+    service: RailServiceDep,
+    user: CurrentUserDep,
+    payload: DeleteRailsRequest = Body(),
+):
+    return await service.delete_rails(payload.rail_ids)
+
+
+@router.post(
+    "/{rail_id}/reject",
+    response_model=RailRead,
+    summary="Отбраковка рельсы",
+    description="Переводит рельсу в статус «Брак» и снимает её с конвейера.",
+    responses={
+        404: {"description": "Рельса не найдена"},
+        409: {"description": "Рельса не в процессе"},
+    },
+)
+async def reject_rail(
+    rail_id: int,
     service: RailServiceDep,
     user: CurrentUserDep,
 ):
-    deleted = await service.delete_rails(rail_ids)
-    return {"deleted": deleted}
+    return await service.reject_rail(rail_id)
 
 
 @router.delete(
