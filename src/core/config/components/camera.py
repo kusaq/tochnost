@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,12 +9,20 @@ from core.config.constants import ENV_FILE_PATH
 class CameraConfig(BaseSettings):
     camera_enabled: bool = Field(default=False)
     camera_mock: bool = Field(default=False)
+    camera_capture_mode: Literal["http", "rtsp"] = Field(default="http")
     camera_capture_interval_sec: float = Field(default=5.0, ge=0.5)
     camera_motion_threshold: float = Field(default=8.0, ge=0.0)
 
     hikvision_user: str = Field(default="")
     hikvision_pass: str = Field(default="")
     hikvision_front_ip: str = Field(default="")
+    hikvision_http_port: int = Field(default=80, ge=1, le=65535)
+    hikvision_http_use_https: bool = Field(default=False)
+    hikvision_http_timeout_sec: float = Field(default=10.0, ge=1.0)
+    hikvision_http_snapshot_path: str = Field(
+        default="",
+        description="Кастомный путь snapshot, напр. /ISAPI/Streaming/channels/101/picture",
+    )
     hikvision_rtsp_port: int = Field(default=554)
     hikvision_front_channel: str = Field(default="101")
     hikvision_rtsp_transport: str = Field(default="tcp")

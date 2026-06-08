@@ -10,6 +10,8 @@ from urllib.parse import quote
 
 import cv2
 import numpy as np
+import requests
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 
 from api.v1.camera.schemas import CameraSnapshotRead
 from core.config import settings
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 IP_BUFFER_FLUSH_FRAMES = 3
 CAPTURE_API = cv2.CAP_FFMPEG
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 
 def _resolve_mock_image_path() -> Path:
@@ -36,6 +39,26 @@ def _resolve_mock_image_path() -> Path:
 _workers_started = False
 _worker_task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
+
+
+def build_http_snapshot_urls() -> list[str]:
+    scheme = "https" if settings.hikvision_http_use_https else "http"
+    port = settings.hikvision_http_port
+    default_port = 443 if settings.hikvision_http_use_https else 80
+    port_suffix = "" if port == default_port else f":{port}"
+    base = f"{scheme}://{settings.hikvision_front_ip}{port_suffix}"
+    channel = settings.hikvision_front_channel
+
+    if settings.hikvision_http_snapshot_path:
+        path = settings.hikvision_http_snapshot_path
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return [f"{base}{path}"]
+
+    return [
+        f"{base}/ISAPI/Streaming/channels/{channel}/picture",
+        f"{base}/Streaming/channels/{channel}/picture",
+    ]
 
 
 def build_rtsp_url(
@@ -108,6 +131,28 @@ def encode_jpeg(frame: np.ndarray, quality: int) -> bytes:
     return encoded.tobytes()
 
 
+def _needs_frame_processing() -> bool:
+    return any(
+        (
+            settings.hikvision_crop_top,
+            settings.hikvision_crop_bottom,
+            settings.hikvision_crop_left,
+            settings.hikvision_crop_right,
+        )
+    )
+
+
+def decode_jpeg(jpeg_bytes: bytes) -> np.ndarray:
+    frame = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError("Failed to decode JPEG frame from camera")
+    return frame
+
+
+def is_jpeg_payload(payload: bytes) -> bool:
+    return len(payload) >= 3 and payload[:3] == JPEG_MAGIC
+
+
 @dataclass(slots=True)
 class CameraState:
     captured_at: datetime | None = None
@@ -165,8 +210,24 @@ class _CaptureSession:
         self.rtsp_url = None
 
 
+@dataclass
+class _HttpCaptureSession:
+    session: requests.Session | None = None
+    prev_gray: np.ndarray | None = None
+    auth_key: str | None = None
+
+    def release(self) -> None:
+        if self.session is not None:
+            self.session.close()
+            self.session = None
+        self.prev_gray = None
+        self.auth_key = None
+
+
 _capture_session = _CaptureSession()
 _capture_session_lock = threading.Lock()
+_http_session = _HttpCaptureSession()
+_http_session_lock = threading.Lock()
 
 
 def _load_mock_jpeg() -> bytes:
@@ -186,6 +247,88 @@ def _open_camera(rtsp_url: str) -> cv2.VideoCapture | None:
         if attempt < 3:
             logger.warning("Camera reconnect attempt %s/3", attempt)
     return None
+
+
+def _get_http_session() -> requests.Session:
+    auth_key = (
+        f"{settings.hikvision_user}:{settings.hikvision_pass}:"
+        f"{settings.hikvision_http_use_https}:{settings.hikvision_http_port}"
+    )
+    with _http_session_lock:
+        if _http_session.session is None or _http_session.auth_key != auth_key:
+            if _http_session.session is not None:
+                _http_session.session.close()
+            session = requests.Session()
+            session.auth = HTTPDigestAuth(settings.hikvision_user, settings.hikvision_pass)
+            _http_session.session = session
+            _http_session.auth_key = auth_key
+            _http_session.prev_gray = None
+        return _http_session.session
+
+
+def _fetch_http_snapshot(url: str, session: requests.Session) -> bytes:
+    timeout = settings.hikvision_http_timeout_sec
+    response = session.get(url, timeout=timeout)
+
+    if response.status_code == 401:
+        response = requests.get(
+            url,
+            auth=HTTPBasicAuth(settings.hikvision_user, settings.hikvision_pass),
+            timeout=timeout,
+        )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"HTTP snapshot failed ({response.status_code}) for {url.split('//', 1)[-1]}"
+        )
+
+    payload = response.content
+    if not is_jpeg_payload(payload):
+        raise RuntimeError(f"HTTP snapshot returned non-JPEG payload from {url.split('//', 1)[-1]}")
+
+    return payload
+
+
+def _process_jpeg_frame(jpeg_bytes: bytes, prev_gray: np.ndarray | None) -> tuple[bytes, bool, float, np.ndarray]:
+    frame = decode_jpeg(jpeg_bytes)
+    frame = crop_frame(
+        frame,
+        crop_top=settings.hikvision_crop_top,
+        crop_bottom=settings.hikvision_crop_bottom,
+        crop_left=settings.hikvision_crop_left,
+        crop_right=settings.hikvision_crop_right,
+    )
+
+    curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    motion_detected, motion_score, next_gray = detect_motion(
+        prev_gray,
+        curr_gray,
+        settings.camera_motion_threshold,
+    )
+
+    if _needs_frame_processing():
+        jpeg_bytes = encode_jpeg(frame, settings.hikvision_jpeg_quality)
+
+    return jpeg_bytes, motion_detected, motion_score, next_gray
+
+
+def _capture_http_frame() -> tuple[bytes, bool, float]:
+    urls = build_http_snapshot_urls()
+    session = _get_http_session()
+    errors: list[str] = []
+
+    for url in urls:
+        try:
+            jpeg_bytes = _fetch_http_snapshot(url, session)
+            with _http_session_lock:
+                processed = _process_jpeg_frame(jpeg_bytes, _http_session.prev_gray)
+                _http_session.prev_gray = processed[3]
+            return processed[0], processed[1], processed[2]
+        except Exception as exc:
+            errors.append(f"{url.split('//', 1)[-1]}: {exc}")
+            logger.warning("HTTP snapshot attempt failed for %s: %s", url, exc)
+
+    raise RuntimeError("Failed to fetch HTTP camera snapshot. " + "; ".join(errors))
 
 
 def _capture_rtsp_frame() -> tuple[bytes, bool, float]:
@@ -250,7 +393,10 @@ def _capture_once() -> None:
         else:
             if not settings.hikvision_front_ip:
                 raise RuntimeError("HIKVISION_FRONT_IP is not configured")
-            jpeg_bytes, motion_detected, motion_score = _capture_rtsp_frame()
+            if settings.camera_capture_mode == "http":
+                jpeg_bytes, motion_detected, motion_score = _capture_http_frame()
+            else:
+                jpeg_bytes, motion_detected, motion_score = _capture_rtsp_frame()
             status = "ok"
 
         CAMERA_STATE.update(
@@ -276,15 +422,25 @@ def _capture_once() -> None:
 
 async def _camera_worker(stop_event: asyncio.Event) -> None:
     interval = settings.camera_capture_interval_sec
-    logger.info(
-        "Camera worker started (mock=%s, interval=%ss, target=%s:%s ch=%s transport=%s)",
-        settings.camera_mock,
-        interval,
-        settings.hikvision_front_ip or "(empty)",
-        settings.hikvision_rtsp_port,
-        settings.hikvision_front_channel,
-        settings.hikvision_rtsp_transport,
-    )
+    if settings.camera_capture_mode == "http":
+        logger.info(
+            "Camera worker started (mode=http, mock=%s, interval=%ss, target=%s:%s ch=%s)",
+            settings.camera_mock,
+            interval,
+            settings.hikvision_front_ip or "(empty)",
+            settings.hikvision_http_port,
+            settings.hikvision_front_channel,
+        )
+    else:
+        logger.info(
+            "Camera worker started (mode=rtsp, mock=%s, interval=%ss, target=%s:%s ch=%s transport=%s)",
+            settings.camera_mock,
+            interval,
+            settings.hikvision_front_ip or "(empty)",
+            settings.hikvision_rtsp_port,
+            settings.hikvision_front_channel,
+            settings.hikvision_rtsp_transport,
+        )
     try:
         while not stop_event.is_set():
             await asyncio.to_thread(_capture_once)
@@ -297,6 +453,8 @@ async def _camera_worker(stop_event: asyncio.Event) -> None:
     finally:
         with _capture_session_lock:
             _capture_session.release()
+        with _http_session_lock:
+            _http_session.release()
         logger.info("Camera worker stopped")
 
 
@@ -355,6 +513,8 @@ async def stop_camera_worker() -> None:
 
     with _capture_session_lock:
         _capture_session.release()
+    with _http_session_lock:
+        _http_session.release()
 
     _workers_started = False
     _worker_task = None
