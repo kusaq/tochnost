@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -45,7 +46,9 @@ def build_rtsp_url(
     port: int | str = 554,
     transport: str = "udp",
 ) -> str:
-    base = f"rtsp://{username}:{password}@{ip}:{port}/Streaming/Channels/{channel}"
+    safe_user = quote(username, safe="")
+    safe_pass = quote(password, safe="")
+    base = f"rtsp://{safe_user}:{safe_pass}@{ip}:{port}/Streaming/Channels/{channel}"
     if transport.lower() == "tcp":
         base = f"{base}{'&' if '?' in base else '?'}tcp"
     return base
@@ -274,9 +277,13 @@ def _capture_once() -> None:
 async def _camera_worker(stop_event: asyncio.Event) -> None:
     interval = settings.camera_capture_interval_sec
     logger.info(
-        "Camera worker started (mock=%s, interval=%ss)",
+        "Camera worker started (mock=%s, interval=%ss, target=%s:%s ch=%s transport=%s)",
         settings.camera_mock,
         interval,
+        settings.hikvision_front_ip or "(empty)",
+        settings.hikvision_rtsp_port,
+        settings.hikvision_front_channel,
+        settings.hikvision_rtsp_transport,
     )
     try:
         while not stop_event.is_set():
@@ -304,6 +311,20 @@ async def start_camera_worker() -> asyncio.Task | None:
             motion_score=None,
             status="disabled",
             error_message="Camera worker is disabled (CAMERA_ENABLED=false)",
+        )
+        return None
+
+    if not settings.camera_mock and not settings.hikvision_front_ip:
+        logger.error(
+            "Camera enabled but HIKVISION_FRONT_IP is empty — copy HIKVISION_* vars into tochnost/.env"
+        )
+        CAMERA_STATE.update(
+            captured_at=None,
+            image_base64=None,
+            motion_detected=False,
+            motion_score=None,
+            status="error",
+            error_message="HIKVISION_FRONT_IP не задан в tochnost/.env",
         )
         return None
 

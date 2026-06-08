@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: dockerfiles/Dockerfile.app
+      args:
+        UV_DEFAULT_INDEX: ${UV_DEFAULT_INDEX:-}
     ports:
       - "8000:${APP_PORT:-8000}"
     env_file:

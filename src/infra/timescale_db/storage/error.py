@@ -36,6 +36,17 @@ class ErrorStorage(PostgresStorage[Error]):
         res = await self._db.execute(select(func.count()).select_from(Error))
         return int(res.scalar_one() or 0)
 
+    async def count_since(self, since: datetime) -> int:
+        since_param = since
+        if since.tzinfo is not None:
+            try:
+                since_param = since.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                since_param = since.replace(tzinfo=None)
+        stmt = select(func.count()).select_from(Error).where(Error.created_at >= since_param)
+        res = await self._db.execute(stmt)
+        return int(res.scalar_one() or 0)
+
     async def count_grouped_by_hour_since(self, since: datetime) -> list[tuple[datetime, int]]:
         """
         Возвращает список (час, количество) для ошибок, созданных с момента 'since' включительно.

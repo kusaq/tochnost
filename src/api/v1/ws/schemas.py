@@ -67,7 +67,7 @@ class DashboardStatusEnvelope(BaseModel):
 class DashboardStatsData(BaseModel):
     temperature_current: float | str = Field(description="Текущая температура или 'N/A' если нет данных")
     humidity_current: float | str = Field(description="Текущая влажность (%) или 'N/A' если нет данных")
-    errors_count: int = Field(description="Всего ошибок в системе")
+    errors_count: int = Field(description="Количество ошибок с начала текущих суток")
     rails_today: int = Field(description="Количество завершённых рельс с начала суток")
     rails_per_hour: int = Field(description="Количество завершённых рельс за последний час")
     avg_speed_per_hour: float = Field(description="Средняя скорость сборки (рельс/час) за текущие сутки")

@@ -52,7 +52,7 @@ async def run_push_stats(ws: WebSocket, redis: RedisAPI) -> None:
 
             async with get_unscoped_db() as db:
                 uow = TimeScaleDBUnitOfWork(db)
-                errors_count = await uow.error.count_all()
+                errors_count = await uow.error.count_since(today_start)
                 rails_today = await uow.rail.count_completed_since(today_start)
                 rails_per_hour = await uow.rail.count_completed_since(hour_ago)
 
