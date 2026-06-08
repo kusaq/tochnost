@@ -523,3 +523,17 @@ async def stop_camera_worker() -> None:
 
 def get_snapshot() -> CameraSnapshotRead:
     return CAMERA_STATE.to_read()
+
+
+def capture_rail_jpeg_once() -> bytes:
+    """Однократный снимок с той же камеры, что на дашборде (HIKVISION_FRONT_*)."""
+    if settings.camera_mock:
+        jpeg_bytes, _, _ = _capture_mock_frame()
+        return jpeg_bytes
+    if not settings.hikvision_front_ip:
+        raise RuntimeError("HIKVISION_FRONT_IP is not configured")
+    if settings.camera_capture_mode == "http":
+        jpeg_bytes, _, _ = _capture_http_frame()
+    else:
+        jpeg_bytes, _, _ = _capture_rtsp_frame()
+    return jpeg_bytes

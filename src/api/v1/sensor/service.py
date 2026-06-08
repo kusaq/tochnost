@@ -25,6 +25,7 @@ from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
 from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
 from api.v1.rail.fsm import detach_rail_from_sensor_state
 from api.v1.ws.service import cache_dashboard_env_stats
+from infra.telegram.rail_burst import schedule_rail_departure_burst
 
 logger = logging.getLogger(__name__)
 TIMING_CONFIG = RshrTimingConfig.from_env()
@@ -626,6 +627,7 @@ class SensorService(BaseService):
         )
         if self.state.is_tightening_active() and self.state.tightening_rail_id() == rail_id:
             await self._finalize_tightening_cycle(ts, session)
+        schedule_rail_departure_burst(rail_id)
         await self.finalize_rail(session)
 
     async def _maybe_close_active_rail(self, event_ts: datetime) -> None:
