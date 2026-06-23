@@ -133,6 +133,7 @@ class SensorService(BaseService):
         gauge: float,
         gauge_ok: bool,
         gauge_avg: float,
+        nuts: list[dict] | None = None,
     ) -> None:
         await self.redis.publish(
             "dashboard:stages",
@@ -155,10 +156,28 @@ class SensorService(BaseService):
                     "mm_gauge": gauge,
                     "mm_gauge_ok": gauge_ok,
                     "mm_gauge_avg": gauge_avg,
+                    "nuts": nuts if nuts is not None else [],
                 },
                 ensure_ascii=False,
             ),
         )
+
+    @staticmethod
+    def _build_nuts_payload(dashboard_nuts: dict[int, dict]) -> list[dict]:
+        """Маппинг каналов M1..M4 -> позиции ЛН/ЛВ/ПН/ПВ (каналы 1,2 — левая сторона)."""
+        positions = {1: "ЛН", 2: "ЛВ", 3: "ПН", 4: "ПВ"}
+        result: list[dict] = []
+        for ch in (1, 2, 3, 4):
+            entry = dashboard_nuts.get(ch, {"count": 0, "torque": 0.0, "ok": True})
+            result.append(
+                {
+                    "position": positions[ch],
+                    "count": int(entry.get("count", 0)),
+                    "torque": float(entry.get("torque", 0.0)),
+                    "ok": bool(entry.get("ok", True)),
+                }
+            )
+        return result
 
     async def _track_bad_range(
         self,
@@ -349,6 +368,7 @@ class SensorService(BaseService):
                 summary=f"Начало закрутки РШР #{rail_id}",
                 payload={"mm_along_rail": session.last_mm_along_rail},
             )
+        await self._publish_post2_stages(session)
         return
 
     async def _finalize_tightening_cycle(self, ts: datetime, session: RailSession) -> None:
@@ -359,6 +379,8 @@ class SensorService(BaseService):
         errors_to_add: list[Error] = []
         sensors: list[Sensor2] = []
         rail_id = session.rail_id
+        per_channel_torque: dict[int, float] = {}
+        per_channel_ok: dict[int, bool] = {}
 
         for ch in range(1, 5):
             m_key = f"M{ch}"
@@ -373,7 +395,9 @@ class SensorService(BaseService):
                 mm_along_rail=cycle.cycle_start_mm,
                 channel=ch,
             )
+            channel_ok = True
             if ft_threshold and (max_m < ft_threshold.min_value or max_m > ft_threshold.max_value):
+                channel_ok = False
                 side = "левой" if ch in (1, 2) else "правой"
                 verdict = "недостаточно" if max_m < ft_threshold.min_value else "излишне"
                 serial = self.state.get_rail_screw_count(rail_id)
@@ -391,6 +415,8 @@ class SensorService(BaseService):
                     )
                 )
             await self.uow.screw.update(screw_id=screw_id, status=ScrewStatus.COMPLETED)
+            per_channel_torque[ch] = max_m
+            per_channel_ok[ch] = channel_ok
 
             row = dict(base)
             row[f"frequency_torque_{ch}"] = max_m
@@ -412,6 +438,7 @@ class SensorService(BaseService):
                 )
         if sensors:
             await self.uow.sensor2.add_many(sensors)
+        self.state.record_nut_cycle(rail_id, per_channel_torque, per_channel_ok)
         await emit_pipeline_event(
             "tightening_completed",
             rshr_id=rail_id,
@@ -419,6 +446,7 @@ class SensorService(BaseService):
             summary=f"Закрутка завершена: {len(sensors)} гаек, РШР #{rail_id}",
             payload={"screw_count": len(sensors), "errors": len(errors_to_add)},
         )
+        await self._publish_post2_stages(session)
 
     async def add_screw(
         self,
@@ -511,6 +539,22 @@ class SensorService(BaseService):
         errors_count = await self.uow.error.count_by_rail(active.rail_id)
         screws_completed = self.state.get_dashboard_screws()
         mm_gauge_avg = self.state.get_gauge_average()
+        geometry = {
+            "left_val": left_val,
+            "left_ok": left_ok,
+            "right_val": right_val,
+            "right_ok": right_ok,
+            "vleft_val": vleft_val,
+            "vleft_ok": vleft_ok,
+            "vright_val": vright_val,
+            "vright_ok": vright_ok,
+            "current_mm": current_mm,
+            "gauge": gauge_cur,
+            "gauge_ok": gauge_ok,
+            "gauge_avg": mm_gauge_avg,
+        }
+        self.state.set_last_stage_geometry(geometry)
+        nuts = self._build_nuts_payload(self.state.get_dashboard_nuts(active.rail_id))
         await self._publish_stages(
             errors_count=errors_count,
             current_mm=current_mm,
@@ -529,6 +573,43 @@ class SensorService(BaseService):
             gauge=gauge_cur,
             gauge_ok=gauge_ok,
             gauge_avg=mm_gauge_avg,
+            nuts=nuts,
+        )
+
+    async def _publish_post2_stages(self, session: RailSession) -> None:
+        """Живая публикация стадий во время закрутки на посту 2.
+
+        Геометрия (износ/колея) переиспользуется из последнего снимка поста 1,
+        счётчики гаек и момент берутся из live-учёта state.
+        """
+        rail_id = session.rail_id
+        geom = self.state.get_last_stage_geometry() or {}
+        errors_count = await self.uow.error.count_by_rail(rail_id)
+        screws_completed = self.state.get_dashboard_screws()
+        res_cur = self.state.get_resistance_current()
+        res_avg = self.state.get_resistance_average()
+        th_res = await self.get_threshold("resistance")
+        res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
+        nuts = self._build_nuts_payload(self.state.get_dashboard_nuts(rail_id))
+        await self._publish_stages(
+            errors_count=errors_count,
+            current_mm=int(geom.get("current_mm", session.last_mm_along_rail)),
+            left_val=float(geom.get("left_val", 0.0)),
+            left_ok=bool(geom.get("left_ok", True)),
+            right_val=float(geom.get("right_val", 0.0)),
+            right_ok=bool(geom.get("right_ok", True)),
+            vleft_val=float(geom.get("vleft_val", 0.0)),
+            vleft_ok=bool(geom.get("vleft_ok", True)),
+            vright_val=float(geom.get("vright_val", 0.0)),
+            vright_ok=bool(geom.get("vright_ok", True)),
+            screws_completed=screws_completed,
+            resistance=res_cur,
+            resistance_avg=res_avg,
+            resistance_ok=res_ok,
+            gauge=float(geom.get("gauge", 0.0)),
+            gauge_ok=bool(geom.get("gauge_ok", True)),
+            gauge_avg=float(geom.get("gauge_avg", 0.0)),
+            nuts=nuts,
         )
 
     async def add_sensor1_data(self, data: Sensor1Create) -> None:

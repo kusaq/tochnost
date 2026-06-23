@@ -86,15 +86,15 @@ async def run_push_status(ws: WebSocket) -> None:
                 "channel": "dashboard:status",
             }
 
-            active = SENSOR_STATE.get_active_rail()
-            if not active:
+            dashboard_rail_id = SENSOR_STATE.get_dashboard_rail_id()
+            if dashboard_rail_id is None:
                 message["data"] = {}
                 await ws.send_text(json.dumps(message, ensure_ascii=False))
                 continue
 
             async with get_unscoped_db() as db:
                 uow = TimeScaleDBUnitOfWork(db)
-                rail = await uow.rail.get_by_id(active.rail_id)
+                rail = await uow.rail.get_by_id(dashboard_rail_id)
 
             if rail is None:
                 message["data"] = {}

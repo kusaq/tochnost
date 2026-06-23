@@ -21,6 +21,15 @@ class DashboardErrorsEnvelope(BaseModel):
     data: DashboardErrorData = Field(description="Данные события ошибки")
 
 
+class NutStage(BaseModel):
+    position: Literal["ЛН", "ЛВ", "ПН", "ПВ"] = Field(
+        description="Позиция гайки: ЛН/ЛВ — левая сторона, ПН/ПВ — правая"
+    )
+    count: int = Field(description="Количество закрученных гаек на данной позиции")
+    torque: float = Field(description="Последний зафиксированный момент закрутки (Нм)")
+    ok: bool = Field(description="Затяжка в пределах допуска")
+
+
 class DashboardStagesData(BaseModel):
     errors_count: int = Field(description="Количество ошибок по текущей рельсе")
     mmAlongRail: int = Field(description="Текущее положение вдоль рельсы (мм) от начала РШР")
@@ -38,6 +47,10 @@ class DashboardStagesData(BaseModel):
     mm_gauge: float = Field(description="Текущая ширина колеи (мм)")
     mm_gauge_ok: bool = Field(description="Ширина колеи в норме")
     mm_gauge_avg: float = Field(description="Средняя ширина колеи (мм) по текущей рельсе")
+    nuts: list[NutStage] = Field(
+        default_factory=list,
+        description="Состояние 4 гаек закрутки (счётчик + момент) по позициям ЛН/ЛВ/ПН/ПВ",
+    )
 
 
 class DashboardStagesEnvelope(BaseModel):

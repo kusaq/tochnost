@@ -95,6 +95,10 @@ class SensorState:
         self._packets_late_append: int = 0
         self._packets_stale: int = 0
         self._worker_errors: int = 0
+        # Гайки по каналам для дашборда: rail_id -> {channel(1..4): {count, torque, ok}}
+        self._dashboard_nuts: dict[int, dict[int, dict[str, Any]]] = {}
+        # Последний снимок геометрии стадий (с поста 1), чтобы переиспользовать на посту 2
+        self._last_stage_geometry: dict[str, Any] | None = None
 
     def merged_queue(self) -> asyncio.Queue:
         return self._merged_queue
@@ -326,6 +330,52 @@ class SensorState:
             return self.get_rail_screw_count(post2_id)
         return 0
 
+    def get_dashboard_rail_id(self) -> int | None:
+        """РШР, которую показываем на дашборде: активная (пост 1), либо на посту 2, либо ждущая."""
+        active = self.get_active_rail()
+        if active is not None:
+            return active.rail_id
+        if self._post2.rail_at_post2 is not None:
+            return self._post2.rail_at_post2
+        if self._waiting_at_post2:
+            return next(iter(self._waiting_at_post2))
+        return None
+
+    def record_nut_cycle(
+        self,
+        rail_id: int,
+        per_channel_torque: dict[int, float],
+        per_channel_ok: dict[int, bool],
+    ) -> None:
+        """Фиксирует завершённый цикл закрутки: +1 гайка на каждый канал, последний момент и статус."""
+        channels = self._dashboard_nuts.setdefault(
+            rail_id, {ch: {"count": 0, "torque": 0.0, "ok": True} for ch in (1, 2, 3, 4)}
+        )
+        for ch in (1, 2, 3, 4):
+            entry = channels[ch]
+            entry["count"] = int(entry["count"]) + 1
+            entry["torque"] = float(per_channel_torque.get(ch, entry["torque"]))
+            entry["ok"] = bool(per_channel_ok.get(ch, True))
+
+    def get_dashboard_nuts(self, rail_id: int | None) -> dict[int, dict[str, Any]]:
+        if rail_id is None:
+            return {ch: {"count": 0, "torque": 0.0, "ok": True} for ch in (1, 2, 3, 4)}
+        return self._dashboard_nuts.get(
+            rail_id, {ch: {"count": 0, "torque": 0.0, "ok": True} for ch in (1, 2, 3, 4)}
+        )
+
+    def clear_dashboard_nuts(self, rail_id: int) -> None:
+        self._dashboard_nuts.pop(rail_id, None)
+
+    def set_last_stage_geometry(self, geometry: dict[str, Any]) -> None:
+        self._last_stage_geometry = dict(geometry)
+
+    def get_last_stage_geometry(self) -> dict[str, Any] | None:
+        return self._last_stage_geometry
+
+    def clear_last_stage_geometry(self) -> None:
+        self._last_stage_geometry = None
+
     def tightening_rail_id(self) -> int | None:
         return self._tightening_rail_id
 
@@ -509,6 +559,8 @@ class SensorState:
         self._packets_stale = 0
         self._worker_errors = 0
         self._bad_ranges.clear()
+        self._dashboard_nuts.clear()
+        self._last_stage_geometry = None
         if drain_queues:
             for q in (self._merged_queue, self._sensor1_queue, self._sensor2_queue):
                 while True:
