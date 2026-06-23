@@ -447,6 +447,83 @@ class SensorService(BaseService):
         )
         return screw.screw_id
 
+    def _active_rail_transferred_to_post2(self, active: RailSession) -> bool:
+        """РШР уже на посту 2, но active на посту 1 не сняли (лазер не гас)."""
+        post2 = self.state.post2_tracker()
+        if self.state.is_rail_waiting_at_post2(active.rail_id):
+            return True
+        return active.rail_id == post2.rail_at_post2
+
+    def _is_mm_reset_for_new_rail(self, active: RailSession, mm: int) -> bool:
+        if mm + self.NEW_RAIL_MM_RESET_DROP_MM < active.last_mm_along_rail:
+            return True
+        return active.last_mm_along_rail >= 500 and mm < active.last_mm_along_rail - 500
+
+    def _should_start_new_rail_on_post1(self, active: RailSession, data: Sensor1Create) -> bool:
+        if not (data.values.laser_on_rail_left or data.values.laser_on_rail_right):
+            return False
+        if self._active_rail_transferred_to_post2(active):
+            return True
+        if active.laser_off_at is not None:
+            return True
+        return self._is_mm_reset_for_new_rail(active, int(data.values.mm_along_rail))
+
+    async def _handoff_active_from_post1(self, active: RailSession, ts: datetime) -> None:
+        """Снимает active с поста 1, если РШР уже ждёт/стоит на посту 2."""
+        current = self.state.get_active_rail()
+        if current is None or current.rail_id != active.rail_id:
+            return
+        if self.state.is_rail_waiting_at_post2(active.rail_id):
+            self.state.clear_active()
+            return
+        if active.laser_off_at is None:
+            active.laser_off_at = ts
+        await self.park_active_for_post2()
+
+    async def _publish_post1_stages_for_packet(self, data: Sensor1Create, active: RailSession) -> None:
+        current_mm = data.values.mm_along_rail
+        th_left = await self.get_threshold("mm_side_wear_left")
+        th_right = await self.get_threshold("mm_side_wear_right")
+        th_vleft = await self.get_threshold("mm_vertical_wear_left")
+        th_vright = await self.get_threshold("mm_vertical_wear_right")
+        th_res = await self.get_threshold("resistance")
+        th_gauge = await self.get_threshold("mm_gauge")
+        left_val = data.values.mm_side_wear_left
+        right_val = data.values.mm_side_wear_right
+        vleft_val = data.values.mm_vertical_wear_left
+        vright_val = data.values.mm_vertical_wear_right
+        left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
+        right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
+        vleft_ok = True if th_vleft is None else (th_vleft.min_value <= vleft_val <= th_vleft.max_value)
+        vright_ok = True if th_vright is None else (th_vright.min_value <= vright_val <= th_vright.max_value)
+        res_cur = self.state.get_resistance_current()
+        res_avg = self.state.get_resistance_average()
+        res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
+        gauge_cur = data.values.mm_gauge
+        gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
+        errors_count = await self.uow.error.count_by_rail(active.rail_id)
+        screws_completed = self.state.get_dashboard_screws()
+        mm_gauge_avg = self.state.get_gauge_average()
+        await self._publish_stages(
+            errors_count=errors_count,
+            current_mm=current_mm,
+            left_val=left_val,
+            left_ok=left_ok,
+            right_val=right_val,
+            right_ok=right_ok,
+            vleft_val=vleft_val,
+            vleft_ok=vleft_ok,
+            vright_val=vright_val,
+            vright_ok=vright_ok,
+            screws_completed=screws_completed,
+            resistance=res_cur,
+            resistance_avg=res_avg,
+            resistance_ok=res_ok,
+            gauge=gauge_cur,
+            gauge_ok=gauge_ok,
+            gauge_avg=mm_gauge_avg,
+        )
+
     async def add_sensor1_data(self, data: Sensor1Create) -> None:
         if data.sensor_id == 1:
             await self.process_first_sensor1_data(data)
@@ -465,6 +542,9 @@ class SensorService(BaseService):
             return
 
         active = self.state.get_active_rail()
+        if active is not None and self._active_rail_transferred_to_post2(active):
+            await self._handoff_active_from_post1(active, data.timestamp)
+            active = None
 
         if active is None:
             if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
@@ -472,21 +552,12 @@ class SensorService(BaseService):
             await self.bind_active_rail(data)
             return
 
-        laser_on = data.values.laser_on_rail_left or data.values.laser_on_rail_right
-        # Граница новой РШР на посту 1. В норме её ловит laser_off_at (разрыв лазера
-        # между рельсами). Но если предыдущая РШР уже ушла на пост 2, а лазер поста 1
-        # так и не «погас» (идут впритык / залипание датчика), laser_off_at остаётся
-        # None, и пакеты нового рельса прилипали к старой активной сессии — новая РШР
-        # не создавалась («уезжала в молоко»). Дополнительно ловим сброс mmAlongRail:
-        # новый рельс всегда начинает отсчёт с ~0.
-        mm_reset = (
-            int(data.values.mm_along_rail) + self.NEW_RAIL_MM_RESET_DROP_MM
-            < active.last_mm_along_rail
-        )
-        if laser_on and (active.laser_off_at is not None or mm_reset):
+        if self._should_start_new_rail_on_post1(active, data):
             if active.laser_off_at is None:
                 active.laser_off_at = data.timestamp
             await self.park_active_for_post2()
+            if self.state.get_active_rail() is not None:
+                await self._handoff_active_from_post1(active, data.timestamp)
             await self.bind_active_rail(data)
             return
 
@@ -529,47 +600,7 @@ class SensorService(BaseService):
                 **data.values.model_dump(),
             )
         )
-        th_left = await self.get_threshold("mm_side_wear_left")
-        th_right = await self.get_threshold("mm_side_wear_right")
-        th_vleft = await self.get_threshold("mm_vertical_wear_left")
-        th_vright = await self.get_threshold("mm_vertical_wear_right")
-        th_res = await self.get_threshold("resistance")
-        th_gauge = await self.get_threshold("mm_gauge")
-        left_val = data.values.mm_side_wear_left
-        right_val = data.values.mm_side_wear_right
-        vleft_val = data.values.mm_vertical_wear_left
-        vright_val = data.values.mm_vertical_wear_right
-        left_ok = True if th_left is None else (th_left.min_value <= left_val <= th_left.max_value)
-        right_ok = True if th_right is None else (th_right.min_value <= right_val <= th_right.max_value)
-        vleft_ok = True if th_vleft is None else (th_vleft.min_value <= vleft_val <= th_vleft.max_value)
-        vright_ok = True if th_vright is None else (th_vright.min_value <= vright_val <= th_vright.max_value)
-        res_cur = self.state.get_resistance_current()
-        res_avg = self.state.get_resistance_average()
-        res_ok = True if th_res is None else (th_res.min_value <= res_cur <= th_res.max_value)
-        gauge_cur = data.values.mm_gauge
-        gauge_ok = True if th_gauge is None else (th_gauge.min_value <= gauge_cur <= th_gauge.max_value)
-        errors_count = await self.uow.error.count_by_rail(active.rail_id)
-        screws_completed = self.state.get_dashboard_screws()
-        mm_gauge_avg = self.state.get_gauge_average()
-        await self._publish_stages(
-            errors_count=errors_count,
-            current_mm=current_mm,
-            left_val=left_val,
-            left_ok=left_ok,
-            right_val=right_val,
-            right_ok=right_ok,
-            vleft_val=vleft_val,
-            vleft_ok=vleft_ok,
-            vright_val=vright_val,
-            vright_ok=vright_ok,
-            screws_completed=screws_completed,
-            resistance=res_cur,
-            resistance_avg=res_avg,
-            resistance_ok=res_ok,
-            gauge=gauge_cur,
-            gauge_ok=gauge_ok,
-            gauge_avg=mm_gauge_avg,
-        )
+        await self._publish_post1_stages_for_packet(data, active)
         return
 
     async def process_second_sensor1_data(self, data: Sensor1Create) -> None:
@@ -616,6 +647,10 @@ class SensorService(BaseService):
                 )
                 if departed_id is not None:
                     await self._depart_rail_from_post2(departed_id, ts)
+                if recognized_id is not None:
+                    active = self.state.get_active_rail()
+                    if active is not None and active.rail_id == recognized_id:
+                        await self._handoff_active_from_post1(active, ts)
         elif not on_rail and was_on:
             self.state.set_post2_laser_was_on(False)
             post2.last_laser_off_at = ts
@@ -849,8 +884,11 @@ class SensorService(BaseService):
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
         prev = self.state.get_active_rail()
-        if prev is not None and prev.laser_off_at is not None:
-            await self.park_active_for_post2()
+        if prev is not None:
+            if prev.laser_off_at is not None or self._active_rail_transferred_to_post2(prev):
+                if prev.laser_off_at is None:
+                    prev.laser_off_at = data.timestamp
+                await self.park_active_for_post2()
 
         self.state.clear_screw_session()
         self.state.reset_resistance_stats()
@@ -908,6 +946,7 @@ class SensorService(BaseService):
         await self.uow.sensor1.add(
             Sensor1(rail_id=rail.rail_id, timestamp=data.timestamp, **data.values.model_dump())
         )
+        await self._publish_post1_stages_for_packet(data, active)
 
     async def list_sensor1_by_rail(self, rail_id: int, *, limit: int = 20, offset: int = 0):
         if await self.uow.rail.get_by_id(rail_id) is None:
