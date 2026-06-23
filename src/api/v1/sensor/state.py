@@ -90,7 +90,7 @@ class SensorState:
         self._post2_laser_was_on: bool = False
         self._modbus_skipped_no_post2: int = 0
         self._fsm_lock = asyncio.Lock()
-        self._watermark: datetime | None = None
+        self._watermarks: dict[str, datetime] = {}
         self._packets_reordered: int = 0
         self._packets_late_append: int = 0
         self._packets_stale: int = 0
@@ -108,12 +108,16 @@ class SensorState:
     def fsm_lock(self) -> asyncio.Lock:
         return self._fsm_lock
 
-    def get_watermark(self) -> datetime | None:
-        return self._watermark
+    def get_watermark(self, key: str | None = None) -> datetime | None:
+        if key is not None:
+            return self._watermarks.get(key)
+        candidates = list(self._watermarks.values())
+        return max(candidates) if candidates else None
 
-    def set_watermark(self, ts: datetime) -> None:
-        if self._watermark is None or ts > self._watermark:
-            self._watermark = ts
+    def set_watermark(self, key: str, ts: datetime) -> None:
+        current = self._watermarks.get(key)
+        if current is None or ts > current:
+            self._watermarks[key] = ts
 
     def mark_packet_reordered(self) -> None:
         self._packets_reordered += 1
@@ -167,7 +171,8 @@ class SensorState:
                 "unmatched_segments": post2.unmatched_segments,
             },
             "post2_laser_was_on": self._post2_laser_was_on,
-            "watermark": self._watermark.isoformat() if self._watermark else None,
+            "watermarks": {key: ts.isoformat() for key, ts in self._watermarks.items()},
+            "watermark": self.get_watermark().isoformat() if self.get_watermark() else None,
             "tightening_active": self._tightening.active,
             "tightening_rail_id": self._tightening_rail_id,
             "rail_screw_count": dict(self._rail_screw_count),
@@ -498,7 +503,7 @@ class SensorState:
         self._post2 = Post2Tracker()
         self._post2_laser_was_on = False
         self._modbus_skipped_no_post2 = 0
-        self._watermark = None
+        self._watermarks.clear()
         self._packets_reordered = 0
         self._packets_late_append = 0
         self._packets_stale = 0

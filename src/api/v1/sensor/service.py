@@ -32,6 +32,13 @@ TIMING_CONFIG = RshrTimingConfig.from_env()
 _event_counter = itertools.count()
 
 
+def _event_watermark_key(ev: MergedSensorEvent) -> str:
+    if ev.kind == "s1":
+        sensor_id = getattr(ev.payload, "sensor_id", "unknown")
+        return f"s1:{sensor_id}"
+    return ev.kind
+
+
 class SensorService(BaseService):
     state: SensorState
 
@@ -1020,7 +1027,7 @@ async def _process_merged_event(state: SensorState, ev: MergedSensorEvent) -> No
                 ev.kind,
                 ev.event_ts,
             )
-        state.set_watermark(ev.event_ts)
+        state.set_watermark(_event_watermark_key(ev), ev.event_ts)
 
 
 async def _sensor_merged_worker(state: SensorState) -> None:
@@ -1066,7 +1073,8 @@ async def _sensor_merged_worker(state: SensorState) -> None:
 
 
 async def _handle_merged_event(state: SensorState, ev: MergedSensorEvent) -> None:
-    current_wm = state.get_watermark()
+    watermark_key = _event_watermark_key(ev)
+    current_wm = state.get_watermark(watermark_key)
     if current_wm is not None and ev.event_ts < current_wm:
         state.mark_packet_reordered()
 
@@ -1089,7 +1097,7 @@ async def _handle_merged_event(state: SensorState, ev: MergedSensorEvent) -> Non
             "packet_stale",
             event_ts=ev.event_ts,
             summary=f"Устаревший пакет {ev.kind}",
-            payload={"kind": ev.kind, "event_ts": ev.event_ts.isoformat()},
+            payload={"kind": ev.kind, "stream_key": watermark_key, "event_ts": ev.event_ts.isoformat()},
         )
         return
     if policy == LatePacketPolicy.LATE_APPEND:
