@@ -95,7 +95,22 @@ async def _run_stream_sender(ws: WebSocket, queue: asyncio.Queue) -> None:
         if ws.client_state != WebSocketState.CONNECTED:
             break
         message = {"type": "event", "data": event}
-        await ws.send_text(json.dumps(message, ensure_ascii=False))
+        try:
+            await ws.send_text(json.dumps(message, ensure_ascii=False))
+        except Exception:
+            # Соединение оборвалось/зависло — выходим, чтобы хэндлер закрыл WS
+            # и фронт переподключился (и заново получил snapshot).
+            break
+
+
+async def _run_stream_receiver(ws: WebSocket) -> None:
+    while True:
+        try:
+            await ws.receive_text()
+        except WebSocketDisconnect:
+            break
+        except Exception:
+            break
 
 
 @router.websocket("/ws")
@@ -119,20 +134,22 @@ async def stream_monitor_ws(websocket: WebSocket) -> None:
         await websocket.send_text(json.dumps(snapshot, ensure_ascii=False, default=str))
 
         sender_task = asyncio.create_task(_run_stream_sender(websocket, queue))
+        receiver_task = asyncio.create_task(_run_stream_receiver(websocket))
         try:
-            while True:
-                try:
-                    await websocket.receive_text()
-                except WebSocketDisconnect:
-                    break
-                except Exception:
-                    await asyncio.sleep(1)
+            # Завершаемся, как только умирает любая из сторон: отправитель
+            # (обрыв/зависание send) или приёмник (клиент отключился).
+            await asyncio.wait(
+                {sender_task, receiver_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         finally:
-            sender_task.cancel()
-            try:
-                await sender_task
-            except asyncio.CancelledError:
-                pass
+            for task in (sender_task, receiver_task):
+                task.cancel()
+            for task in (sender_task, receiver_task):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
     finally:
         STREAM_MONITOR_STATE.unsubscribe(queue)
 

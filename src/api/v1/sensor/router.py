@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Response, status, HTTPException
 import asyncio
+import logging
 
 from api.v1.sensor.dependencies import SensorServiceDep
 from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read, SensorStateResetRequest
@@ -11,7 +12,28 @@ from api.v1.stream_monitor.service import stream_monitor
 from api.v1.ws.service import cache_dashboard_env_stats
 from infra.redis.dependencies import RedisDep
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/sensor", tags=["Sensor"])
+
+# Держим сильные ссылки на фоновые задачи записи в монитор: иначе asyncio
+# хранит только слабые ссылки и задача может быть собрана GC до завершения.
+_monitor_tasks: set[asyncio.Task] = set()
+
+
+def _record_monitor_event(event: MergedSensorEvent) -> None:
+    task = asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
+    _monitor_tasks.add(task)
+    task.add_done_callback(_on_monitor_task_done)
+
+
+def _on_monitor_task_done(task: asyncio.Task) -> None:
+    _monitor_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("stream monitor recording failed: %r", exc)
 
 
 def _enqueue(state, event: MergedSensorEvent) -> None:
@@ -36,7 +58,7 @@ async def save_first_sensor_data(
         received_at=datetime.now(timezone.utc),
     )
     _enqueue(state, event)
-    asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
+    _record_monitor_event(event)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -79,7 +101,7 @@ async def save_second_sensor_data(
         received_at=datetime.now(timezone.utc),
     )
     _enqueue(state, event)
-    asyncio.create_task(stream_monitor.record_merged_sensor_event(event))
+    _record_monitor_event(event)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
 

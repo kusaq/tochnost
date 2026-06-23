@@ -150,14 +150,28 @@ class StreamMonitorState:
 
     def _broadcast(self, event: StoredStreamEvent) -> None:
         message = event_to_dict(event)
-        dead: list[asyncio.Queue] = []
         for queue in list(self._subscribers):
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                dead.append(queue)
-        for queue in dead:
-            self._subscribers.discard(queue)
+                # Медленный подписчик (фоновая вкладка / просадка сети): сбрасываем
+                # самые старые события, чтобы освободить место под новое. Подписку
+                # НЕ удаляем — иначе при живом WS монитор молча перестаёт получать
+                # данные навсегда, пока страницу не перезагрузят.
+                self._drop_oldest_and_put(queue, message)
+
+    @staticmethod
+    def _drop_oldest_and_put(queue: asyncio.Queue, message: dict[str, Any]) -> None:
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                queue.put_nowait(message)
+                return
+            except asyncio.QueueFull:
+                continue
 
     def get_recent(
         self,
