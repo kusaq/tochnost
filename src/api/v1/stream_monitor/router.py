@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, Response, WebSocket, WebSocketDisconnect, status
 from starlette.websockets import WebSocketState
@@ -87,6 +88,58 @@ async def list_correlation_groups(
 )
 async def stream_monitor_stats() -> StreamMonitorStats:
     return StreamMonitorStats(**stream_monitor.get_stats())
+
+
+@router.get(
+    "/export",
+    summary="Экспорт событий монитора",
+    description="Выгружает события буфера для офлайн-анализа. "
+    "mode=pipeline — только события конвейера (без сырых sensor_raw); "
+    "mode=full — весь буфер; mode=incident — bundle (события + stats + groups + снимок FSM). "
+    "format=jsonl — построчный JSON, format=json — единый объект. Авторизация не требуется.",
+)
+async def export_stream_events(
+    mode: str = Query(default="pipeline", pattern="^(pipeline|full|incident)$"),
+    fmt: str = Query(default="jsonl", alias="format", pattern="^(jsonl|json)$"),
+) -> Response:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    if mode == "incident":
+        from api.v1.sensor.service import get_worker_status
+        from api.v1.sensor.state import SENSOR_STATE
+
+        sensor_state = SENSOR_STATE.debug_snapshot()
+        sensor_state["workers"] = get_worker_status()
+        bundle = {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "stats": stream_monitor.get_stats(),
+            "groups": stream_monitor.get_correlation_groups(limit=200),
+            "events": stream_monitor.export_events(mode="pipeline"),
+            "sensor_state": sensor_state,
+        }
+        content = json.dumps(bundle, ensure_ascii=False, default=str)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="incident_{ts}.json"'},
+        )
+
+    events = stream_monitor.export_events(mode="full" if mode == "full" else "pipeline")
+
+    if fmt == "jsonl":
+        content = "\n".join(json.dumps(ev, ensure_ascii=False, default=str) for ev in events)
+        return Response(
+            content=content,
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{mode}_{ts}.jsonl"'},
+        )
+
+    content = json.dumps({"events": events}, ensure_ascii=False, default=str)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{mode}_{ts}.json"'},
+    )
 
 
 async def _run_stream_sender(ws: WebSocket, queue: asyncio.Queue) -> None:

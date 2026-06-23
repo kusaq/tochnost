@@ -94,6 +94,7 @@ class SensorState:
         self._packets_reordered: int = 0
         self._packets_late_append: int = 0
         self._packets_stale: int = 0
+        self._worker_errors: int = 0
 
     def merged_queue(self) -> asyncio.Queue:
         return self._merged_queue
@@ -123,12 +124,55 @@ class SensorState:
     def mark_packet_stale(self) -> None:
         self._packets_stale += 1
 
+    def mark_worker_error(self) -> None:
+        self._worker_errors += 1
+
     def packet_counters(self) -> dict[str, int]:
         return {
             "packets_reordered": self._packets_reordered,
             "packets_late_append": self._packets_late_append,
             "packets_stale": self._packets_stale,
             "modbus_skipped_no_post2": self._modbus_skipped_no_post2,
+            "worker_errors": self._worker_errors,
+        }
+
+    def debug_snapshot(self) -> dict[str, Any]:
+        """Снимок текущего состояния FSM для удалённой диагностики."""
+
+        def session_dict(s: RailSession | None) -> dict[str, Any] | None:
+            if s is None:
+                return None
+            return {
+                "rail_id": s.rail_id,
+                "start_time": s.start_time.isoformat() if s.start_time else None,
+                "last_timestamp": s.last_timestamp.isoformat() if s.last_timestamp else None,
+                "start_mm_along_rail": s.start_mm_along_rail,
+                "last_mm_along_rail": s.last_mm_along_rail,
+                "laser_off_at": s.laser_off_at.isoformat() if s.laser_off_at else None,
+                "post2_depart_at": s.post2_depart_at.isoformat() if s.post2_depart_at else None,
+            }
+
+        post2 = self._post2
+        return {
+            "active_rail": session_dict(self._active),
+            "waiting_at_post2": {
+                rail_id: session_dict(s) for rail_id, s in self._waiting_at_post2.items()
+            },
+            "closed_count": len(self._closed),
+            "post2": {
+                "fifo_rail_ids": list(post2.fifo_rail_ids),
+                "rail_at_post2": post2.rail_at_post2,
+                "post2_laser_on": post2.post2_laser_on,
+                "post2_segment_index": post2.post2_segment_index,
+                "unmatched_segments": post2.unmatched_segments,
+            },
+            "post2_laser_was_on": self._post2_laser_was_on,
+            "watermark": self._watermark.isoformat() if self._watermark else None,
+            "tightening_active": self._tightening.active,
+            "tightening_rail_id": self._tightening_rail_id,
+            "rail_screw_count": dict(self._rail_screw_count),
+            "merged_queue_size": self._merged_queue.qsize(),
+            "packet_counters": self.packet_counters(),
         }
 
     def mark_modbus_skipped_no_post2(self) -> None:
@@ -458,6 +502,7 @@ class SensorState:
         self._packets_reordered = 0
         self._packets_late_append = 0
         self._packets_stale = 0
+        self._worker_errors = 0
         self._bad_ranges.clear()
         if drain_queues:
             for q in (self._merged_queue, self._sensor1_queue, self._sensor2_queue):

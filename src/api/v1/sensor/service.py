@@ -1040,45 +1040,69 @@ async def _sensor_merged_worker(state: SensorState) -> None:
 
             while pending and pending[0][0] <= watermark:
                 _, _, ev = heapq.heappop(pending)
-                current_wm = state.get_watermark()
-                if current_wm is not None and ev.event_ts < current_wm:
-                    state.mark_packet_reordered()
-
-                closed_rail_id = state.is_in_closed(ev.event_ts)
-                closed_session = state.find_closed_rail(closed_rail_id) if closed_rail_id is not None else None
-                policy = classify_late_packet(
-                    ev.event_ts,
-                    watermark=current_wm,
-                    rail_start=closed_session.start_time if closed_session else None,
-                    rail_end=(closed_session.end_time or closed_session.last_timestamp) if closed_session else None,
-                    rail_closed=closed_session is not None,
-                    config=TIMING_CONFIG,
-                    now=ev.received_at,
-                )
-
-                if policy == LatePacketPolicy.STALE:
-                    state.mark_packet_stale()
-                    logger.warning("Dropping stale packet kind=%s event_ts=%s", ev.kind, ev.event_ts)
-                    await emit_pipeline_event(
-                        "packet_stale",
-                        event_ts=ev.event_ts,
-                        summary=f"Устаревший пакет {ev.kind}",
-                        payload={"kind": ev.kind, "event_ts": ev.event_ts.isoformat()},
+                # Любая ошибка обработки одного пакета не должна ронять бесконечный
+                # цикл worker'а — иначе sensor_raw продолжает писаться, а FSM молча
+                # умирает и РШР перестаёт создаваться.
+                try:
+                    await _handle_merged_event(state, ev)
+                except Exception:
+                    state.mark_worker_error()
+                    logger.exception(
+                        "merged worker event failed kind=%s event_ts=%s",
+                        ev.kind,
+                        ev.event_ts,
                     )
-                    continue
-                if policy == LatePacketPolicy.LATE_APPEND:
-                    state.mark_packet_late_append()
-                    await emit_pipeline_event(
-                        "packet_late",
-                        rshr_id=closed_rail_id,
-                        event_ts=ev.event_ts,
-                        summary=f"Поздний пакет {ev.kind} для РШР #{closed_rail_id}",
-                        payload={"kind": ev.kind},
-                    )
-
-                await _process_merged_event(state, ev)
+                    try:
+                        await emit_pipeline_event(
+                            "worker_error",
+                            event_ts=ev.event_ts,
+                            summary=f"Ошибка обработки пакета {ev.kind}",
+                            payload={"kind": ev.kind, "event_ts": ev.event_ts.isoformat()},
+                        )
+                    except Exception:
+                        logger.exception("failed to emit worker_error event")
         finally:
             state.merged_queue().task_done()
+
+
+async def _handle_merged_event(state: SensorState, ev: MergedSensorEvent) -> None:
+    current_wm = state.get_watermark()
+    if current_wm is not None and ev.event_ts < current_wm:
+        state.mark_packet_reordered()
+
+    closed_rail_id = state.is_in_closed(ev.event_ts)
+    closed_session = state.find_closed_rail(closed_rail_id) if closed_rail_id is not None else None
+    policy = classify_late_packet(
+        ev.event_ts,
+        watermark=current_wm,
+        rail_start=closed_session.start_time if closed_session else None,
+        rail_end=(closed_session.end_time or closed_session.last_timestamp) if closed_session else None,
+        rail_closed=closed_session is not None,
+        config=TIMING_CONFIG,
+        now=ev.received_at,
+    )
+
+    if policy == LatePacketPolicy.STALE:
+        state.mark_packet_stale()
+        logger.warning("Dropping stale packet kind=%s event_ts=%s", ev.kind, ev.event_ts)
+        await emit_pipeline_event(
+            "packet_stale",
+            event_ts=ev.event_ts,
+            summary=f"Устаревший пакет {ev.kind}",
+            payload={"kind": ev.kind, "event_ts": ev.event_ts.isoformat()},
+        )
+        return
+    if policy == LatePacketPolicy.LATE_APPEND:
+        state.mark_packet_late_append()
+        await emit_pipeline_event(
+            "packet_late",
+            rshr_id=closed_rail_id,
+            event_ts=ev.event_ts,
+            summary=f"Поздний пакет {ev.kind} для РШР #{closed_rail_id}",
+            payload={"kind": ev.kind},
+        )
+
+    await _process_merged_event(state, ev)
 
 
 _workers_started = False
@@ -1142,6 +1166,16 @@ async def rehydrate_in_progress_rails(state: SensorState) -> None:
             rail.rail_id,
             screw_count,
         )
+
+
+def get_worker_status() -> dict:
+    """Статус фоновых worker'ов для debug-эндпоинта."""
+    return {
+        "workers_started": _workers_started,
+        "worker_count": len(_worker_tasks),
+        "workers_alive": [not t.done() for t in _worker_tasks],
+        "all_alive": bool(_worker_tasks) and all(not t.done() for t in _worker_tasks),
+    }
 
 
 async def start_sensor_workers() -> list[asyncio.Task]:

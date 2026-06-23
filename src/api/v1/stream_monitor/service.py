@@ -99,6 +99,9 @@ class StreamMonitorService:
         stats = self._state.get_stats()
         return stats
 
+    def export_events(self, *, mode: str = "pipeline") -> list[dict[str, Any]]:
+        return self._state.export_events(mode=mode)
+
     def get_correlation_groups(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._state.get_correlation_groups(limit=limit)
 

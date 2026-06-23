@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from rshr_core.config import RshrTimingConfig
@@ -12,6 +12,15 @@ class LatePacketPolicy(str, Enum):
     NORMAL = "normal"
     LATE_APPEND = "late_append"
     STALE = "stale"
+
+
+def _naive_utc(dt: datetime | None) -> datetime | None:
+    """Приводит datetime к naive UTC, чтобы безопасно сравнивать aware и naive метки."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def classify_late_packet(
@@ -30,11 +39,18 @@ def classify_late_packet(
     - NORMAL: in-order within open rail window
     - LATE_APPEND: closed rail, event within [start, end + late_append_grace]
     - STALE: too old vs watermark or beyond max_late_packet_sec
+
+    Все метки приводятся к naive UTC: ``received_at`` приходит aware, а ``event_ts``
+    нормализован в naive — вычитание разнотипных datetime роняло worker (TypeError).
     """
-    if now is None:
-        now = datetime.utcnow()
+    event_ts = _naive_utc(event_ts)
+    watermark = _naive_utc(watermark)
+    rail_start = _naive_utc(rail_start)
+    rail_end = _naive_utc(rail_end)
+    now = _naive_utc(now) or datetime.utcnow()
 
     if config.max_late_packet_sec != float("inf"):
+        # Задержка доставки (received_at − event_ts), а не расхождение часов ПЛК.
         age_sec = (now - event_ts).total_seconds()
         if age_sec > config.max_late_packet_sec:
             return LatePacketPolicy.STALE

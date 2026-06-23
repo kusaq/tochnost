@@ -106,6 +106,21 @@ async def save_second_sensor_data(
 
 
 @router.get(
+    "/debug/state",
+    summary="Снимок состояния FSM датчиков",
+    description="Текущее in-memory состояние конвейера РШР (активная рельса, очереди поста 2, "
+    "счётчики пакетов, статус worker'ов). Для удалённой диагностики. Авторизация не требуется.",
+)
+async def sensor_debug_state(state: SensorStateDep) -> dict:
+    from api.v1.sensor.service import get_worker_status
+
+    snapshot = state.debug_snapshot()
+    snapshot["workers"] = get_worker_status()
+    snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return snapshot
+
+
+@router.get(
     "/rail/{rail_id}/sensor1",
     response_model=list[Sensor1Read],
     summary="Показания Sensor1 по рельсе",

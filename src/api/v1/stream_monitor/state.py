@@ -208,6 +208,13 @@ class StreamMonitorState:
             items = items[-limit:]
         return [event_to_dict(ev) for ev in items]
 
+    def export_events(self, *, mode: str = "pipeline") -> list[dict[str, Any]]:
+        """Все события буфера для выгрузки. mode=pipeline исключает шумный sensor_raw."""
+        items = list(self._events)
+        if mode == "pipeline":
+            items = [ev for ev in items if ev.event_type != "sensor_raw"]
+        return [event_to_dict(ev) for ev in items]
+
     def get_stats(self) -> dict[str, Any]:
         return {
             "total_received": self._total_received,
