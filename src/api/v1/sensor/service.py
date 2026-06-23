@@ -41,6 +41,11 @@ class SensorService(BaseService):
     RSHR_LENGTH_MIN_OK_MM = 20_000
     RSHR_LENGTH_DISCARD_BELOW_MM = 15_000
 
+    # Сброс mmAlongRail к началу = граница новой РШР на посту 1.
+    # Новый рельс всегда начинает отсчёт с ~0, поэтому резкое падение mmAlongRail
+    # относительно активной сессии означает, что приехал следующий рельс.
+    NEW_RAIL_MM_RESET_DROP_MM = 3_000
+
     # Человекочитаемые имена метрик
     METRIC_DISPLAY: dict[str, str] = {
         "resistance": "Сопротивление между рельсами",
@@ -467,9 +472,20 @@ class SensorService(BaseService):
             await self.bind_active_rail(data)
             return
 
-        if (
-            data.values.laser_on_rail_left or data.values.laser_on_rail_right
-        ) and active.laser_off_at is not None:
+        laser_on = data.values.laser_on_rail_left or data.values.laser_on_rail_right
+        # Граница новой РШР на посту 1. В норме её ловит laser_off_at (разрыв лазера
+        # между рельсами). Но если предыдущая РШР уже ушла на пост 2, а лазер поста 1
+        # так и не «погас» (идут впритык / залипание датчика), laser_off_at остаётся
+        # None, и пакеты нового рельса прилипали к старой активной сессии — новая РШР
+        # не создавалась («уезжала в молоко»). Дополнительно ловим сброс mmAlongRail:
+        # новый рельс всегда начинает отсчёт с ~0.
+        mm_reset = (
+            int(data.values.mm_along_rail) + self.NEW_RAIL_MM_RESET_DROP_MM
+            < active.last_mm_along_rail
+        )
+        if laser_on and (active.laser_off_at is not None or mm_reset):
+            if active.laser_off_at is None:
+                active.laser_off_at = data.timestamp
             await self.park_active_for_post2()
             await self.bind_active_rail(data)
             return
@@ -661,7 +677,8 @@ class SensorService(BaseService):
         if active is None or active.laser_off_at is None:
             return
         pass_sec = (active.laser_off_at - active.start_time).total_seconds()
-        if pass_sec > TIMING_CONFIG.post1_max_pass_sec:
+        already_at_post2 = active.rail_id == self.state.post2_tracker().rail_at_post2
+        if pass_sec > TIMING_CONFIG.post1_max_pass_sec and not already_at_post2:
             logger.warning(
                 "post1 pass discarded (%.0fs > %.0fs) rail_id=%s",
                 pass_sec,
