@@ -40,6 +40,8 @@ class RshrTimingConfig:
     post2_min_segment_sec: float = 3.0
     # Макс. длительность проезда post1 (лазер ON→OFF); дольше — мусор, не в FIFO/post2
     post1_max_pass_sec: float = 2400.0
+    # Мин. продвижение mm_along_rail для подтверждения реального РШР (отсекает руку под лазером)
+    laser_confirm_advance_mm: int = 200
     # Норма ~200 гаек на ~25 м; вне диапазона — запись в error, не правим «органику»
     screws_count_min_ok: int = 160
     screws_count_max_ok: int = 220
@@ -57,6 +59,7 @@ class RshrTimingConfig:
             max_tightening_window_sec=_env_float("MAX_TIGHTENING_WINDOW_SEC", 180.0),
             post2_min_segment_sec=_env_float("POST2_MIN_SEGMENT_SEC", 3.0),
             post1_max_pass_sec=_env_float("POST1_MAX_PASS_SEC", 2400.0),
+            laser_confirm_advance_mm=_env_int("LASER_CONFIRM_ADVANCE_MM", 200),
             screws_count_min_ok=_env_int("SCREWS_COUNT_MIN_OK", 160),
             screws_count_max_ok=_env_int("SCREWS_COUNT_MAX_OK", 220),
         )

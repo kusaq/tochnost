@@ -499,8 +499,9 @@ class SensorService(BaseService):
             return False
         if self._active_rail_transferred_to_post2(active):
             return True
-        if active.laser_off_at is not None:
-            return True
+        # Новый рельс распознаём только по реальному сбросу mm к ~0.
+        # Раньше тут было `laser_off_at is not None`, но из-за этого кратковременное
+        # мигание лазера (рука) раскалывало один рельс на два.
         return self._is_mm_reset_for_new_rail(active, int(data.values.mm_along_rail))
 
     async def _handoff_active_from_post1(self, active: RailSession, ts: datetime) -> None:
@@ -635,10 +636,12 @@ class SensorService(BaseService):
             active = None
 
         if active is None:
-            if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
-                return
-            await self.bind_active_rail(data)
+            await self._handle_post1_idle(data)
             return
+
+        # Появился активный рельс — незавершённый кандидат старта больше не актуален.
+        if self.state.has_pending_post1():
+            self.state.clear_pending_post1()
 
         if self._should_start_new_rail_on_post1(active, data):
             if active.laser_off_at is None:
@@ -661,6 +664,46 @@ class SensorService(BaseService):
             )
             return
 
+        # Лазер снова ON без сброса mm — это было кратковременное мигание (рука),
+        # отменяем отложенное закрытие, чтобы не расколоть рельс на два.
+        if active.laser_off_at is not None:
+            active.laser_off_at = None
+
+        await self._apply_sensor1_to_active(data, active)
+        return
+
+    async def _handle_post1_idle(self, data: Sensor1Create) -> None:
+        """Пост 1, нет активного рельса: подтверждаем старт только по движению mm_along_rail."""
+        laser_on = bool(data.values.laser_on_rail_left or data.values.laser_on_rail_right)
+
+        if not laser_on:
+            # Лазер погас до подтверждения движением — ложное срабатывание (рука под лазером).
+            if self.state.has_pending_post1():
+                self.state.clear_pending_post1()
+            return
+
+        if not self.state.has_pending_post1():
+            self.state.begin_pending_post1(data)
+        else:
+            self.state.append_pending_post1(data)
+
+        if self.state.pending_post1_advance_mm() >= TIMING_CONFIG.laser_confirm_advance_mm:
+            await self._confirm_pending_post1()
+
+    async def _confirm_pending_post1(self) -> None:
+        """Движение подтвердило реальный РШР: создаём рельс и проигрываем накопленные пакеты."""
+        pending = self.state.take_pending_post1()
+        if pending is None or not pending.buffer:
+            return
+        await self.bind_active_rail(pending.buffer[0])
+        active = self.state.get_active_rail()
+        if active is None:
+            return
+        for data in pending.buffer[1:]:
+            await self._apply_sensor1_to_active(data, active)
+
+    async def _apply_sensor1_to_active(self, data: Sensor1Create, active: RailSession) -> None:
+        """Обработка пакета Sensor1 при активном рельсе и лазере ON."""
         self.state.record_laser_flags(
             left_on_rail=data.values.laser_on_rail_left,
             right_on_rail=data.values.laser_on_rail_right,
@@ -689,7 +732,6 @@ class SensorService(BaseService):
             )
         )
         await self._publish_post1_stages_for_packet(data, active)
-        return
 
     async def process_second_sensor1_data(self, data: Sensor1Create) -> None:
         values = data.values
@@ -697,51 +739,39 @@ class SensorService(BaseService):
         was_on = self.state.post2_laser_was_on()
         post2 = self.state.post2_tracker()
         ts = data.timestamp
+        current_mm = int(values.mm_along_rail)
 
         if on_rail and not was_on:
-            min_seg = timedelta(seconds=TIMING_CONFIG.post2_min_segment_sec)
-            if (
-                post2.last_laser_off_at is not None
-                and (ts - post2.last_laser_off_at) < min_seg
-            ):
-                logger.debug("post2 laser glitch ignored (%.2fs)", (ts - post2.last_laser_off_at).total_seconds())
-            elif not post2.fifo_rail_ids:
-                post2.unmatched_segments += 1
-                self.state.set_post2_laser_was_on(True)
-                logger.debug(
-                    "post2 segment ignored: empty fifo (unmatched=%s)",
-                    post2.unmatched_segments,
-                )
-                await emit_pipeline_event(
-                    "post2_unmatched",
-                    event_ts=ts,
-                    summary="Пост 2: лазер без РШР в очереди",
-                    payload={"unmatched_segments": post2.unmatched_segments},
-                )
-            else:
-                departed_id = post2.on_post2_segment_start()
-                self.state.set_post2_laser_was_on(True)
-                recognized_id = post2.rail_at_post2
-                await emit_pipeline_event(
-                    "post2_recognized",
-                    rshr_id=recognized_id,
-                    event_ts=ts,
-                    summary=f"Пост 2: распознан проход РШР #{recognized_id}",
-                    payload={
-                        "departed_rail_id": departed_id,
-                        "fifo_remaining": list(post2.fifo_rail_ids),
-                        "segment_index": post2.post2_segment_index,
-                    },
-                )
-                if departed_id is not None:
-                    await self._depart_rail_from_post2(departed_id, ts)
-                if recognized_id is not None:
-                    active = self.state.get_active_rail()
-                    if active is not None and active.rail_id == recognized_id:
-                        await self._handoff_active_from_post1(active, ts)
+            # Фронт ON: не выпускаем рельс сразу, открываем кандидата сегмента.
+            self.state.set_post2_laser_was_on(True)
+            post2.pending_segment = True
+            post2.pending_start_mm = current_mm
+            post2.pending_start_ts = ts
+        elif on_rail and was_on and post2.pending_segment:
+            # Кандидат открыт: выпуск из FIFO только после подтверждения движением
+            # (mm продвинулся) либо удержанием лазера >= post2_min_segment_sec —
+            # страховка на случай, если энкодер поста 2 не двигается.
+            advanced = (
+                post2.pending_start_mm is not None
+                and (current_mm - post2.pending_start_mm) >= TIMING_CONFIG.laser_confirm_advance_mm
+            )
+            held = (
+                post2.pending_start_ts is not None
+                and (ts - post2.pending_start_ts) >= timedelta(seconds=TIMING_CONFIG.post2_min_segment_sec)
+            )
+            if advanced or held:
+                post2.pending_segment = False
+                post2.pending_start_mm = None
+                post2.pending_start_ts = None
+                await self._confirm_post2_segment(ts)
         elif not on_rail and was_on:
             self.state.set_post2_laser_was_on(False)
             post2.last_laser_off_at = ts
+            # Лазер погас до подтверждения сегмента — ложное срабатывание (рука),
+            # FIFO не трогаем, кандидат сбрасываем.
+            post2.pending_segment = False
+            post2.pending_start_mm = None
+            post2.pending_start_ts = None
 
         rail_id = self._modbus_target_rail_id(for_modbus=False)
         if rail_id is None:
@@ -751,6 +781,43 @@ class SensorService(BaseService):
             await self.uow.sensor1.add(
                 Sensor1(rail_id=rail_id, timestamp=data.timestamp, **values.model_dump())
             )
+
+    async def _confirm_post2_segment(self, ts: datetime) -> None:
+        """Подтверждённый движением сегмент поста 2: выпуск рельса из FIFO."""
+        post2 = self.state.post2_tracker()
+        if not post2.fifo_rail_ids:
+            post2.unmatched_segments += 1
+            logger.debug(
+                "post2 segment ignored: empty fifo (unmatched=%s)",
+                post2.unmatched_segments,
+            )
+            await emit_pipeline_event(
+                "post2_unmatched",
+                event_ts=ts,
+                summary="Пост 2: лазер без РШР в очереди",
+                payload={"unmatched_segments": post2.unmatched_segments},
+            )
+            return
+
+        departed_id = post2.on_post2_segment_start()
+        recognized_id = post2.rail_at_post2
+        await emit_pipeline_event(
+            "post2_recognized",
+            rshr_id=recognized_id,
+            event_ts=ts,
+            summary=f"Пост 2: распознан проход РШР #{recognized_id}",
+            payload={
+                "departed_rail_id": departed_id,
+                "fifo_remaining": list(post2.fifo_rail_ids),
+                "segment_index": post2.post2_segment_index,
+            },
+        )
+        if departed_id is not None:
+            await self._depart_rail_from_post2(departed_id, ts)
+        if recognized_id is not None:
+            active = self.state.get_active_rail()
+            if active is not None and active.rail_id == recognized_id:
+                await self._handoff_active_from_post1(active, ts)
 
     async def _depart_rail_from_post2(self, rail_id: int, ts: datetime) -> None:
         session = self.state.find_rail_session(rail_id)

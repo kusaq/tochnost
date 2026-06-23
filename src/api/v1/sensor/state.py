@@ -30,6 +30,10 @@ class Post2Tracker:
     post2_segment_index: int = 0
     unmatched_segments: int = 0
     last_laser_off_at: datetime | None = None
+    # Кандидат сегмента: фронт ON зафиксирован, выпуск из FIFO откладывается до подтверждения
+    pending_segment: bool = False
+    pending_start_mm: int | None = None
+    pending_start_ts: datetime | None = None
 
     def enqueue_opened_rail(self, rail_id: int) -> None:
         self.fifo_rail_ids.append(rail_id)
@@ -49,6 +53,16 @@ class Post2Tracker:
         self.post2_segment_index += 1
         self.post2_laser_on = True
         return departed
+
+
+@dataclass
+class PendingPost1Start:
+    """Кандидат на старт РШР (пост 1): копим пакеты, пока движение не подтвердит реальный рельс."""
+
+    start_mm: int
+    start_ts: datetime
+    last_mm: int
+    buffer: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -99,6 +113,8 @@ class SensorState:
         self._dashboard_nuts: dict[int, dict[int, dict[str, Any]]] = {}
         # Последний снимок геометрии стадий (с поста 1), чтобы переиспользовать на посту 2
         self._last_stage_geometry: dict[str, Any] | None = None
+        # Кандидат на старт РШР (пост 1): защита от ложного срабатывания лазера (рука под лазером)
+        self._pending_post1: PendingPost1Start | None = None
 
     def merged_queue(self) -> asyncio.Queue:
         return self._merged_queue
@@ -500,6 +516,37 @@ class SensorState:
             self._laser_right_true_count = 0
         return int(self._laser_left_true_count), int(self._laser_right_true_count)
 
+    def has_pending_post1(self) -> bool:
+        return self._pending_post1 is not None
+
+    def begin_pending_post1(self, data: Any) -> None:
+        start_mm = int(data.values.mm_along_rail)
+        self._pending_post1 = PendingPost1Start(
+            start_mm=start_mm,
+            start_ts=data.timestamp,
+            last_mm=start_mm,
+            buffer=[data],
+        )
+
+    def append_pending_post1(self, data: Any) -> None:
+        if self._pending_post1 is None:
+            return
+        self._pending_post1.buffer.append(data)
+        self._pending_post1.last_mm = int(data.values.mm_along_rail)
+
+    def pending_post1_advance_mm(self) -> int:
+        if self._pending_post1 is None:
+            return 0
+        return int(self._pending_post1.last_mm - self._pending_post1.start_mm)
+
+    def take_pending_post1(self) -> PendingPost1Start | None:
+        pending = self._pending_post1
+        self._pending_post1 = None
+        return pending
+
+    def clear_pending_post1(self) -> None:
+        self._pending_post1 = None
+
     def get_left_right_counts(self) -> tuple[int, int]:
         active = self.get_active_rail()
         if active is not None:
@@ -561,6 +608,7 @@ class SensorState:
         self._bad_ranges.clear()
         self._dashboard_nuts.clear()
         self._last_stage_geometry = None
+        self._pending_post1 = None
         if drain_queues:
             for q in (self._merged_queue, self._sensor1_queue, self._sensor2_queue):
                 while True:
