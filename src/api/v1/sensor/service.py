@@ -53,6 +53,11 @@ class SensorService(BaseService):
     # относительно активной сессии означает, что приехал следующий рельс.
     NEW_RAIL_MM_RESET_DROP_MM = 3_000
 
+    # mmAlongRail «около нуля»: энкодер сбросился на границе рельса (последний пакет
+    # ухода: laser=false, mm≈0). Отличает реальный уход от мигания лазера в середине
+    # прохода (там mm высокий и не сбрасывается).
+    MM_RESET_NEAR_ZERO = 1_000
+
     # Человекочитаемые имена метрик
     METRIC_DISPLAY: dict[str, str] = {
         "resistance": "Сопротивление между рельсами",
@@ -751,7 +756,17 @@ class SensorService(BaseService):
         if not data.values.laser_on_rail_left and not data.values.laser_on_rail_right:
             if active.laser_off_at is None:
                 active.laser_off_at = data.timestamp
-            await self._maybe_close_active_rail(data.timestamp)
+            # Пост 1: рельс реально прошёл (≥ мин. длины) и лазер погас со сбросом mm к ~0
+            # (граница рельса) → паркуем СРАЗУ, не дожидаясь распознавания на посту 2.
+            # Освобождает пост 1 под следующую решётку (двух РШР на посту 1 быть не может).
+            # Условие mm≈0 отсекает мигание лазера в середине прохода (там mm высокий).
+            if (
+                active.traversed_mm >= self.RSHR_LENGTH_DISCARD_BELOW_MM
+                and int(data.values.mm_along_rail) <= self.MM_RESET_NEAR_ZERO
+            ):
+                await self.park_active_for_post2()
+            else:
+                await self._maybe_close_active_rail(data.timestamp)
             await self.uow.sensor1.add(
                 Sensor1(rail_id=active.rail_id, timestamp=data.timestamp, **data.values.model_dump())
             )
@@ -838,6 +853,11 @@ class SensorService(BaseService):
         # дедупа повторной закрутки той же шпалы). Нет рельса под лазером — None.
         self.state.set_post2_current_mm(current_mm if on_rail else None)
 
+        # Максимальный пройденный mm текущей решётки на посту 2 — сигнал «прошла
+        # полностью» (≈ длине прохода поста 1) для точной финализации по уходу.
+        if on_rail and post2.rail_at_post2 is not None and current_mm > post2.rail_at_post2_max_mm:
+            post2.rail_at_post2_max_mm = current_mm
+
         if on_rail and not was_on:
             # Фронт ON: не выпускаем рельс сразу, открываем кандидата сегмента.
             self.state.set_post2_laser_was_on(True)
@@ -864,8 +884,9 @@ class SensorService(BaseService):
         elif not on_rail and was_on:
             self.state.set_post2_laser_was_on(False)
             post2.last_laser_off_at = ts
-            # Лазер погас до подтверждения сегмента — ложное срабатывание (рука),
-            # FIFO не трогаем, кандидат сбрасываем.
+            # Лазер погас: кандидат сегмента сбрасываем. Сама финализация ушедшего
+            # рельса — в _post_event_tick по settle/grace: ждём «хвост» закрутки
+            # (моменты приходят ещё ~5–10 с после гашения лазера), потом закрываем.
             post2.pending_segment = False
             post2.pending_start_mm = None
             post2.pending_start_ts = None
@@ -889,8 +910,18 @@ class SensorService(BaseService):
             )
 
     async def _confirm_post2_segment(self, ts: datetime) -> None:
-        """Подтверждённый движением сегмент поста 2: выпуск рельса из FIFO."""
+        """Подтверждённый движением сегмент поста 2: выпуск рельса из FIFO.
+
+        Инвариант: на посту 2 физически не может быть двух РШР. Поэтому появление
+        НОВОЙ решётки (подтверждённый сегмент) означает, что предыдущая обязана уйти.
+        Если она не успела финализироваться штатно по лазеру — закрываем принудительно.
+        """
         post2 = self.state.post2_tracker()
+        # Старая решётка ещё «висит» на посту 2 → принудительный уход (была ошибка
+        # финализации: лазер не дал чистый OFF или пакеты ухода не пришли).
+        if post2.rail_at_post2 is not None:
+            await self._finalize_departed_post2_rail(ts, reason="superseded_by_new_segment")
+
         if not post2.fifo_rail_ids:
             post2.unmatched_segments += 1
             logger.debug(
@@ -905,7 +936,7 @@ class SensorService(BaseService):
             )
             return
 
-        departed_id = post2.on_post2_segment_start()
+        departed_id = post2.on_post2_segment_start()  # rail_at_post2 уже снят выше → None
         recognized_id = post2.rail_at_post2
         await emit_pipeline_event(
             "post2_recognized",
@@ -918,12 +949,37 @@ class SensorService(BaseService):
                 "segment_index": post2.post2_segment_index,
             },
         )
-        if departed_id is not None:
+        if departed_id is not None:  # подстраховка, штатно departed_id уже None
             await self._depart_rail_from_post2(departed_id, ts)
         if recognized_id is not None:
             active = self.state.get_active_rail()
             if active is not None and active.rail_id == recognized_id:
                 await self._handoff_active_from_post1(active, ts)
+
+    async def _finalize_departed_post2_rail(self, ts: datetime, *, reason: str) -> bool:
+        """Финализирует текущий `rail_at_post2` (решётка ушла с поста 2) и освобождает
+        пост. Возвращает True, если рельс действительно закрыт.
+
+        Единая точка ухода с поста 2 для всех триггеров: чистый OFF лазера, заезд
+        следующей решётки, grace-фолбэк. Снимает `rail_at_post2`, чтобы Modbus/закрутка
+        не целились в закрытый рельс.
+        """
+        post2 = self.state.post2_tracker()
+        rail_id = post2.rail_at_post2
+        if rail_id is None:
+            return False
+        session = self.state.find_rail_session(rail_id)
+        if session is None or session.post2_depart_at is not None:
+            post2.rail_at_post2 = None
+            post2.rail_at_post2_max_mm = 0
+            post2.last_laser_off_at = None
+            return False
+        logger.info("post2 depart rail_id=%s reason=%s", rail_id, reason)
+        await self._depart_rail_from_post2(rail_id, ts)
+        post2.rail_at_post2 = None
+        post2.rail_at_post2_max_mm = 0
+        post2.last_laser_off_at = None
+        return True
 
     async def _depart_rail_from_post2(self, rail_id: int, ts: datetime) -> None:
         session = self.state.find_rail_session(rail_id)
@@ -943,43 +999,46 @@ class SensorService(BaseService):
         await self.finalize_rail(session)
 
     async def _maybe_close_departed_post2_rail(self, event_ts: datetime) -> None:
-        """Закрывает РШР, ушедшую с поста 2, когда следующего рельса нет.
+        """Финализация рельса, ушедшего с поста 2 (лазер погас), на каждом событии.
 
-        Штатно рельс на посту 2 финализируется приходом СЛЕДУЮЩЕГО сегмента
-        (`on_post2_segment_start` → `_depart_rail_from_post2`). Но для последнего
-        рельса смены/партии следующего сегмента не будет, и без этой страховки РШР
-        навсегда висит «В процессе», хотя физически уже уехала (лазер поста 2 погас).
-        Закрываем по grace после стабильного гашения лазера.
+        Два режима ожидания после последнего OFF лазера:
+        - **settle** (короткий): рельс реально прошёл (`rail_at_post2_max_mm` дотянул до
+          длины) и лазер дал чистый OFF → ждём только «хвост» закрутки (моменты приходят
+          ещё ~5–10 с после гашения), затем закрываем. Это ОСНОВНОЙ путь ухода.
+        - **grace** (длинный): mm не дотянул (мигание/сирота без длины поста 2) — на
+          случай разреженных данных (рельс встал за лазером, пакеты прекратились).
 
         Безопасно для «парковки между сменами»: недокрученный припаркованный рельс
         лежит ПОД лазером поста 2 (`post2_laser_was_on == True`) либо вовсе без пакетов
         лазера (`last_laser_off_at is None` после регидрации) — в обоих случаях выходим.
-        Срабатываем только при реальном уходе: лазер был и стабильно погас.
         """
         post2 = self.state.post2_tracker()
-        rail_id = post2.rail_at_post2
-        if rail_id is None:
+        if post2.rail_at_post2 is None:
             return
         # Рельс ещё под лазером поста 2 (закрутка либо пауза/парковка) — ждём.
         if self.state.post2_laser_was_on():
             return
         if post2.last_laser_off_at is None:
             return
-        grace = timedelta(seconds=TIMING_CONFIG.post2_depart_grace_sec)
-        if event_ts < post2.last_laser_off_at + grace:
+        if post2.rail_at_post2_max_mm >= self.RSHR_LENGTH_DISCARD_BELOW_MM:
+            wait = timedelta(seconds=TIMING_CONFIG.post2_depart_settle_sec)
+            reason = "post2_laser_off"
+        else:
+            wait = timedelta(seconds=TIMING_CONFIG.post2_depart_grace_sec)
+            reason = "grace_no_full_pass"
+        if event_ts < post2.last_laser_off_at + wait:
             return
-        session = self.state.find_rail_session(rail_id)
-        if session is None or session.post2_depart_at is not None:
-            # Закрывать нечего (или уже ушла штатно) — просто снимаем указатель,
-            # чтобы Modbus/закрутка не целились в закрытый рельс.
-            post2.rail_at_post2 = None
-            post2.last_laser_off_at = None
-            return
-        await self._depart_rail_from_post2(rail_id, event_ts)
-        # Преемника нет — освобождаем пост 2 вручную (в штатном пути это делает
-        # on_post2_segment_start, переставляя rail_at_post2 на новый рельс).
-        post2.rail_at_post2 = None
-        post2.last_laser_off_at = None
+        await self._finalize_departed_post2_rail(event_ts, reason=reason)
+
+    async def _post_event_tick(self, event_ts: datetime) -> None:
+        """Страховки после каждого merged-события (не зависят от типа пакета).
+
+        Держать синхронным с боевым `_process_merged_event` И офлайн-харнесом
+        `scripts/replay_logs.py` — оба вызывают этот метод.
+        """
+        if self.state.get_active_rail() is not None:
+            await self._maybe_close_active_rail(event_ts)
+        await self._maybe_close_departed_post2_rail(event_ts)
 
     async def _maybe_close_active_rail(self, event_ts: datetime) -> None:
         active = self.state.get_active_rail()
@@ -1350,12 +1409,7 @@ async def _process_merged_event(state: SensorState, ev: MergedSensorEvent) -> No
                     await service.add_sensor1_data(ev.payload)
                 else:
                     await service.add_sensor2_data(ev.payload)
-                active = state.get_active_rail()
-                if active:
-                    await service._maybe_close_active_rail(ev.event_ts)
-                # Страховка для последнего рельса смены: пост 2 ушёл, преемника нет.
-                # Не зависит от наличия active (он мог уже отъехать/распарковаться).
-                await service._maybe_close_departed_post2_rail(ev.event_ts)
+                await service._post_event_tick(ev.event_ts)
         except Exception:
             logger.exception(
                 "sensor merged worker failed kind=%s event_ts=%s",

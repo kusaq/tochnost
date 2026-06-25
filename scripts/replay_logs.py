@@ -73,7 +73,11 @@ class _Row:
 
 
 class _Enum(str):
-    pass
+    # Реальные RailStatus/RailSide — это enum с .value; код финализации обращается к
+    # `.value` (service.py rshr_closed payload). Поддерживаем, иначе finalize падает.
+    @property
+    def value(self) -> str:
+        return str.__str__(self)
 
 
 def _enum_cls(name, *members):
@@ -361,9 +365,8 @@ async def run_replay(events, *, ts_from=None, ts_to=None):
                         global LOST_TIGHTENING_SPIKES
                         LOST_TIGHTENING_SPIKES += 1
                     await service.add_sensor2_data(payload)
-                active = state.get_active_rail()
-                if active:
-                    await service._maybe_close_active_rail(event_ts)
+                # Те же страховки, что в боевом _process_merged_event.
+                await service._post_event_tick(event_ts)
             except Exception as exc:  # как в проде: один битый пакет не валит прогон
                 sys.stderr.write(f"  ! ошибка обработки {kind} @ {event_ts}: {exc!r}\n")
             state.set_watermark(_event_watermark_key(ev), event_ts)

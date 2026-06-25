@@ -53,11 +53,13 @@ class RshrTimingConfig:
     max_tightening_window_sec: float = 180.0
     # Мин. длительность импульса лазера post2 (отсекает ложный depart)
     post2_min_segment_sec: float = 3.0
-    # Сколько лазер поста 2 должен быть погашен, чтобы закрыть текущий rail_at_post2
-    # БЕЗ следующего сегмента (последний рельс смены/партии). Штатно рельс закрывается
-    # приходом следующей РШР; без этой страховки последний РШР висит «В процессе».
-    # Должен быть заметно больше типового зазора лазера между соседними рельсами,
-    # чтобы реальный преемник закрыл предыдущий штатным путём (с передачей FIFO).
+    # Settle-окно после ЧИСТОГО гашения лазера поста 2 у реально прошедшего рельса
+    # (mm дотянул до длины). Короткое: ждём «хвост» закрутки (моменты приходят ещё
+    # ~5–10 с после гашения лазера), затем финализируем. Это основной путь ухода.
+    post2_depart_settle_sec: float = 15.0
+    # Grace-фолбэк, когда чистого OFF лазера не было (разреженные данные: рельс встал
+    # за лазером — пакеты прекратились, либо сирота без длины). Длинный, чтобы не
+    # закрыть рельс раньше времени. Также страхует последний рельс смены/партии.
     post2_depart_grace_sec: float = 120.0
     # Макс. длительность проезда post1 (лазер ON→OFF); дольше — мусор, не в FIFO/post2
     post1_max_pass_sec: float = 2400.0
@@ -84,6 +86,7 @@ class RshrTimingConfig:
             late_append_grace_sec=_env_float("LATE_APPEND_GRACE_SEC", 180.0),
             max_tightening_window_sec=_env_float("MAX_TIGHTENING_WINDOW_SEC", 180.0),
             post2_min_segment_sec=_env_float("POST2_MIN_SEGMENT_SEC", 3.0),
+            post2_depart_settle_sec=_env_float("POST2_DEPART_SETTLE_SEC", 15.0),
             post2_depart_grace_sec=_env_float("POST2_DEPART_GRACE_SEC", 120.0),
             post1_max_pass_sec=_env_float("POST1_MAX_PASS_SEC", 2400.0),
             laser_confirm_advance_mm=_env_int("LASER_CONFIRM_ADVANCE_MM", 200),

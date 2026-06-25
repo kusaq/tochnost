@@ -30,6 +30,9 @@ class Post2Tracker:
     post2_segment_index: int = 0
     unmatched_segments: int = 0
     last_laser_off_at: datetime | None = None
+    # Максимальный mmAlongRail, пройденный ТЕКУЩИМ rail_at_post2 на посту 2. Сигнал
+    # «решётка реально прошла» (≈ длине прохода поста 1) для точной финализации.
+    rail_at_post2_max_mm: int = 0
     # Кандидат сегмента: фронт ON зафиксирован, выпуск из FIFO откладывается до подтверждения
     pending_segment: bool = False
     pending_start_mm: int | None = None
@@ -50,6 +53,7 @@ class Post2Tracker:
             return None
         departed = self.rail_at_post2
         self.rail_at_post2 = self.fifo_rail_ids.pop(0)
+        self.rail_at_post2_max_mm = 0
         self.post2_segment_index += 1
         self.post2_laser_on = True
         return departed
