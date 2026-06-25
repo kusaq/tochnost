@@ -5,8 +5,17 @@ import asyncio
 import logging
 
 from api.v1.sensor.dependencies import SensorServiceDep
-from api.v1.sensor.schemas import Sensor1Create, Sensor2Create, Sensor1Read, SensorStateResetRequest
+from api.v1.sensor.schemas import (
+    Sensor1Create,
+    Sensor2Create,
+    Sensor1Read,
+    SensorStateResetRequest,
+    QueueSnapshot,
+    FinalizePost2Request,
+    FinalizePost2Response,
+)
 from api.v1.sensor.state import SensorStateDep, MergedSensorEvent
+from api.v1.auth.dependencies import CurrentUserDep
 from api.v1.base.dependencies import PaginationDep
 from api.v1.stream_monitor.service import stream_monitor
 from api.v1.ws.service import cache_dashboard_env_stats
@@ -118,6 +127,40 @@ async def sensor_debug_state(state: SensorStateDep) -> dict:
     snapshot["workers"] = get_worker_status()
     snapshot["generated_at"] = datetime.now(timezone.utc).isoformat()
     return snapshot
+
+
+@router.get(
+    "/queue",
+    response_model=QueueSnapshot,
+    summary="Очередь РШР (живое состояние конвейера)",
+    description="Пост 1 (active), пост 2 (rail_at_post2), очередь FIFO и припаркованные РШР "
+    "с именами и счётчиками гаек. Для оперативного контроля очереди.",
+)
+async def get_sensor_queue(
+    sensor_service: SensorServiceDep,
+    user: CurrentUserDep,
+) -> QueueSnapshot:
+    return await sensor_service.build_queue_view()
+
+
+@router.post(
+    "/post2/finalize",
+    response_model=FinalizePost2Response,
+    summary="Ручная финализация поста 2",
+    description="Закрывает РШР в зоне поста 2 (текущую на посту 2 или припаркованную) без ожидания "
+    "следующего сегмента — чтобы зависший рельс не «портил» очередь. Если rail_id не задан, "
+    "финализируется текущая на посту 2. Эпюра считается по уже записанным гайкам.",
+    responses={
+        404: {"description": "РШР не найдена в конвейере"},
+        409: {"description": "Нет РШР на посту 2 / рельс ещё на посту 1"},
+    },
+)
+async def finalize_post2(
+    body: FinalizePost2Request,
+    sensor_service: SensorServiceDep,
+    user: CurrentUserDep,
+) -> FinalizePost2Response:
+    return await sensor_service.finalize_post2_rail(body.rail_id)
 
 
 @router.get(

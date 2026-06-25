@@ -187,6 +187,51 @@ class SensorStateResetRequest(BaseModel):
     confirm: bool = Field(description="Должно быть True для выполнения сброса")
 
 
+class QueueRailItem(BaseModel):
+    """Одна РШР в конвейере (для страницы «Очередь»)."""
+
+    rail_id: int
+    name: str | None = None
+    scanned_name: str | None = None
+    status: str | None = None
+    screw_count: int = 0
+    sleepers_so_far: int = 0
+    length_mm: int | None = None
+    start_time: datetime | None = None
+    last_timestamp: datetime | None = None
+    from_post2: bool = False
+    tightening_active: bool = False
+
+
+class QueueSnapshot(BaseModel):
+    """Живое состояние конвейера РШР: пост 1, пост 2, очередь FIFO, припаркованные."""
+
+    generated_at: datetime
+    active_post1: QueueRailItem | None = None
+    rail_at_post2: QueueRailItem | None = None
+    queue: list[QueueRailItem] = Field(default_factory=list)
+    parked: list[QueueRailItem] = Field(default_factory=list)
+    post2_laser_on: bool = False
+    counters: dict[str, int] = Field(default_factory=dict)
+
+
+class FinalizePost2Request(BaseModel):
+    """Запрос ручной финализации поста 2. rail_id опционален — по умолчанию текущая на посту 2."""
+
+    rail_id: int | None = Field(
+        default=None, description="ID РШР; если не задан — текущая на посту 2"
+    )
+
+
+class FinalizePost2Response(BaseModel):
+    rail_id: int
+    finalized: bool
+    discarded: bool = False
+    sleepers: int | None = None
+    screw_count: int | None = None
+    length_mm: int | None = None
+
+
 class ThresholdEntry(BaseModel):
     min_value: float
     max_value: float

@@ -11,7 +11,13 @@ from starlette import status
 
 from api.v1.sensor.schemas import ThresholdEntry, Thresholds, RailSession, Screw as ScrewDC
 from api.v1.base.service import BaseService
-from api.v1.sensor.schemas import Sensor1Create, Sensor2Create
+from api.v1.sensor.schemas import (
+    Sensor1Create,
+    Sensor2Create,
+    QueueSnapshot,
+    QueueRailItem,
+    FinalizePost2Response,
+)
 from api.v1.sensor.state import SensorState, MergedSensorEvent
 from infra.timescale_db.models import Rail, Sensor1, Sensor2, Screw, RailStatus, ScrewStatus, Error, RailSide
 from infra.timescale_db.ts_db import get_unscoped_db
@@ -1279,6 +1285,138 @@ class SensorService(BaseService):
             },
         )
         await self._publish_stages_empty()
+
+    async def build_queue_view(self) -> QueueSnapshot:
+        """Снимок конвейера для страницы «Очередь»: пост 1, пост 2, очередь FIFO, припаркованные."""
+        state = self.state
+        post2 = state.post2_tracker()
+        active = state.get_active_rail()
+        active_id = active.rail_id if active else None
+        post2_id = post2.rail_at_post2
+
+        # Очередь ожидания поста 2 = FIFO без активного (он ещё на посту 1) и без текущего на посту 2.
+        queue_ids = [rid for rid in post2.fifo_rail_ids if rid != active_id and rid != post2_id]
+        accounted: set[int] = set(queue_ids)
+        if active_id is not None:
+            accounted.add(active_id)
+        if post2_id is not None:
+            accounted.add(post2_id)
+        # Припаркованные сессии, не попавшие в очередь/пост2 (страховка от рассинхрона FIFO).
+        parked_ids = [rid for rid in state.waiting_rail_ids() if rid not in accounted]
+
+        needed = [i for i in (active_id, post2_id, *queue_ids, *parked_ids) if i is not None]
+        rails_by_id: dict[int, Rail] = {}
+        for rid in needed:
+            rail = await self.uow.rail.get_by_id(rid)
+            if rail is not None:
+                rails_by_id[rid] = rail
+
+        def item(rail_id: int, *, is_post2: bool = False) -> QueueRailItem:
+            session = state.find_rail_session(rail_id)
+            rail = rails_by_id.get(rail_id)
+            return QueueRailItem(
+                rail_id=rail_id,
+                name=rail.name if rail else None,
+                scanned_name=rail.scanned_name if rail else None,
+                status=rail.status.value if rail and rail.status else None,
+                screw_count=state.get_rail_screw_count(rail_id),
+                sleepers_so_far=state.rail_sleeper_count(rail_id),
+                length_mm=rail.length_mm if rail else None,
+                start_time=session.start_time if session else (rail.start_time if rail else None),
+                last_timestamp=session.last_timestamp if session else None,
+                from_post2=session.from_post2 if session else False,
+                tightening_active=bool(
+                    is_post2
+                    and state.is_tightening_active()
+                    and state.tightening_rail_id() == rail_id
+                ),
+            )
+
+        counters = state.packet_counters()
+        return QueueSnapshot(
+            generated_at=datetime.now(timezone.utc),
+            active_post1=item(active_id) if active_id is not None else None,
+            rail_at_post2=item(post2_id, is_post2=True) if post2_id is not None else None,
+            queue=[item(rid) for rid in queue_ids],
+            parked=[item(rid) for rid in parked_ids],
+            post2_laser_on=post2.post2_laser_on,
+            counters={
+                "queue_len": len(queue_ids),
+                "parked_len": len(parked_ids),
+                "fifo_len": len(post2.fifo_rail_ids),
+                "waiting_len": len(state.waiting_rail_ids()),
+                "unmatched_segments": post2.unmatched_segments,
+                "modbus_skipped_no_post2": counters.get("modbus_skipped_no_post2", 0),
+            },
+        )
+
+    async def finalize_post2_rail(self, rail_id: int | None = None) -> FinalizePost2Response:
+        """Ручная финализация поста 2 для РШР в зоне поста 2 (текущая или припаркованная).
+
+        Зеркалит штатный путь ухода (`_depart_rail_from_post2` → `finalize_rail`), но не ждёт
+        прихода следующего сегмента: оператор сам закрывает «зависшую» РШР, чтобы не портить
+        очередь. Берёт `fsm_lock`, чтобы не было гонки с worker'ом конвейера (тот тоже мутирует
+        состояние только под этим локом; `finalize_rail` повторно лок НЕ берёт — дедлока нет).
+        """
+        async with self.state.fsm_lock():
+            post2 = self.state.post2_tracker()
+            target = rail_id if rail_id is not None else post2.rail_at_post2
+            if target is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="На посту 2 нет РШР для финализации",
+                )
+            session = self.state.find_rail_session(target)
+            if session is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"РШР #{target} не найдена в конвейере (возможно, уже закрыта)",
+                )
+            # «Зона поста 2» = rail_at_post2 + waiting_at_post2 (припаркованные/в FIFO).
+            # Рельс, который ещё активен на посту 1 (идёт геометрия, на пост 2 не переходил),
+            # финализировать нельзя — это исказило бы длину/эпюру.
+            is_in_post2_zone = (
+                target == post2.rail_at_post2 or self.state.is_rail_waiting_at_post2(target)
+            )
+            active = self.state.get_active_rail()
+            if not is_in_post2_zone and active is not None and active.rail_id == target:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Нельзя финализировать РШР, которая ещё на посту 1",
+                )
+
+            ts = session.last_timestamp or session.start_time or datetime.utcnow()
+            session.post2_depart_at = ts
+            await emit_pipeline_event(
+                "rshr_departed_post2",
+                rshr_id=target,
+                event_ts=ts,
+                summary=f"РШР #{target} финализирована вручную (пост 2)",
+                payload={"manual": True},
+            )
+            if self.state.is_tightening_active() and self.state.tightening_rail_id() == target:
+                await self._finalize_tightening_cycle(ts, session)
+
+            screw_count = await self.uow.screw.count_by_rail(target)
+            await self.finalize_rail(session)
+
+            # Снимаем рельс с конвейера: убираем из FIFO и освобождаем пост 2, если он там
+            # (в штатном пути это делает on_post2_segment_start, переставляя rail_at_post2).
+            post2.remove_from_fifo(target)
+            if post2.rail_at_post2 == target:
+                post2.rail_at_post2 = None
+                post2.last_laser_off_at = None
+
+            rail = await self.uow.rail.get_by_id(target, include_deleted=True)
+
+        return FinalizePost2Response(
+            rail_id=target,
+            finalized=True,
+            discarded=(rail is None or rail.deleted_at is not None),
+            sleepers=rail.sleepers if rail else None,
+            screw_count=screw_count,
+            length_mm=rail.length_mm if rail else None,
+        )
 
     async def bind_active_rail(self, data: Sensor1Create) -> None:
         prev = self.state.get_active_rail()
