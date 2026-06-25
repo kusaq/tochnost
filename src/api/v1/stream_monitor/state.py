@@ -1,3 +1,4 @@
+import os
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -8,6 +9,30 @@ from fastapi import Depends
 
 STALE_AFTER_SEC = 30
 SENSOR_SOURCES = ("sensor1_post1", "sensor1_post2", "modbus")
+
+# Сырой firehose (sensor_raw) и pipeline-события хранятся РАЗДЕЛЬНО, иначе
+# высокочастотный Sensor1/Modbus за минуты вытесняет редкие rshr_opened /
+# tightening_* / rshr_closed из общего буфера, и экспорт pipeline отдаёт обрезки.
+# Оба размера — на ENV, меняются без пересборки образа.
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Сырой буфер (sensor_raw + всё подряд для live-firehose).
+MAX_EVENTS = _env_int("STREAM_MONITOR_MAX_EVENTS", 5000)
+# Durable-буфер ТОЛЬКО pipeline-событий (низкий поток → большой запас).
+MAX_PIPELINE_EVENTS = _env_int("STREAM_MONITOR_MAX_PIPELINE_EVENTS", 20000)
+# Типы событий, которые НЕ относятся к pipeline (не попадают в durable-буфер).
+RAW_EVENT_TYPES = frozenset({"sensor_raw"})
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -41,8 +66,18 @@ class SensorHealthRecord:
 
 
 class StreamMonitorState:
-    def __init__(self, max_events: int = 5000, max_subscribers: int = 50) -> None:
+    def __init__(
+        self,
+        max_events: int = MAX_EVENTS,
+        max_subscribers: int = 50,
+        max_pipeline_events: int = MAX_PIPELINE_EVENTS,
+    ) -> None:
+        # Сырой firehose: sensor_raw + pipeline вперемешку (live-вкладка, mode=full).
         self._events: deque[StoredStreamEvent] = deque(maxlen=max_events)
+        # Durable-буфер: только pipeline-события. Сырой Modbus/Sensor1 его не трогает,
+        # поэтому rshr_opened → … → rshr_closed не вытесняется потоком и доступен для
+        # экспорта/incident/групп/фильтров даже спустя часы активной закрутки.
+        self._pipeline_events: deque[StoredStreamEvent] = deque(maxlen=max_pipeline_events)
         self._next_id = 0
         self._subscribers: set[asyncio.Queue] = set()
         self._max_subscribers = max_subscribers
@@ -138,6 +173,10 @@ class StreamMonitorState:
                 summary=summary,
             )
             self._events.append(event)
+            if event_type not in RAW_EVENT_TYPES:
+                # Дублируем pipeline-событие в durable-буфер. Память на дубль
+                # ничтожна, зато сырой поток не может его выселить.
+                self._pipeline_events.append(event)
             self._total_received += 1
             self._by_source[source] += 1
             self._by_event_type[event_type] += 1
@@ -183,7 +222,18 @@ class StreamMonitorState:
         correlation_id: str | None = None,
         problems_only: bool = False,
     ) -> list[dict[str, Any]]:
-        items = list(self._events)
+        # Если фильтр нацелен на pipeline (конкретная РШР, проблемы, группа,
+        # источник pipeline или не-сырой тип) — ищем в durable-буфере, чтобы
+        # старые события не оказались уже вытесненными сырым потоком.
+        pipeline_query = (
+            problems_only
+            or rshr_id is not None
+            or correlation_id is not None
+            or source == "pipeline"
+            or (event_type is not None and event_type not in RAW_EVENT_TYPES)
+        )
+        base = self._pipeline_events if pipeline_query else self._events
+        items = list(base)
         if source:
             items = [ev for ev in items if ev.source == source]
         if event_type:
@@ -209,16 +259,24 @@ class StreamMonitorState:
         return [event_to_dict(ev) for ev in items]
 
     def export_events(self, *, mode: str = "pipeline") -> list[dict[str, Any]]:
-        """Все события буфера для выгрузки. mode=pipeline исключает шумный sensor_raw."""
-        items = list(self._events)
+        """События буфера для выгрузки.
+
+        mode=pipeline — durable-буфер pipeline-событий (полная история конвейера,
+        сырой поток её не вытесняет); mode=full — сырой firehose (sensor_raw +
+        pipeline, ограничен MAX_EVENTS).
+        """
         if mode == "pipeline":
-            items = [ev for ev in items if ev.event_type != "sensor_raw"]
+            items = list(self._pipeline_events)
+        else:
+            items = list(self._events)
         return [event_to_dict(ev) for ev in items]
 
     def get_stats(self) -> dict[str, Any]:
         return {
             "total_received": self._total_received,
             "stored_count": len(self._events),
+            "pipeline_stored_count": len(self._pipeline_events),
+            "pipeline_capacity": self._pipeline_events.maxlen,
             "subscribers": len(self._subscribers),
             "by_source": dict(self._by_source),
             "by_event_type": dict(self._by_event_type),
@@ -229,7 +287,9 @@ class StreamMonitorState:
 
     def get_correlation_groups(self, limit: int = 50) -> list[dict[str, Any]]:
         groups: dict[str, list[StoredStreamEvent]] = {}
-        for ev in reversed(self._events):
+        # Группы строим по durable-буферу: correlation_id есть только у
+        # pipeline-событий, а сырой firehose всё равно их вытеснил бы.
+        for ev in reversed(self._pipeline_events):
             if not ev.correlation_id:
                 continue
             bucket = groups.setdefault(ev.correlation_id, [])
@@ -255,6 +315,7 @@ class StreamMonitorState:
     async def clear(self) -> None:
         async with self._lock:
             self._events.clear()
+            self._pipeline_events.clear()
             self._by_source.clear()
             self._by_event_type.clear()
             for rec in self._sensor_health.values():

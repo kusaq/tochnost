@@ -41,6 +41,8 @@ class SensorHealthRead(BaseModel):
 class StreamMonitorStats(BaseModel):
     total_received: int
     stored_count: int
+    pipeline_stored_count: int = 0
+    pipeline_capacity: int | None = None
     subscribers: int
     by_source: dict[str, int]
     by_event_type: dict[str, int] = Field(default_factory=dict)
