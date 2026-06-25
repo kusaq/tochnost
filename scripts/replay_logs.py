@@ -216,7 +216,7 @@ class _ScrewRepo:
             self.by_rail[rid] = self.by_rail.get(rid, 0) + 1
         return screw
 
-    async def update(self, *, screw_id, status):
+    async def update(self, *, screw_id, **fields):
         return None
 
     async def count_by_rail(self, rail_id):
@@ -390,17 +390,31 @@ def build_report(state, uow):
         cycles_by_rail[rid] = cycles_by_rail.get(rid, 0) + 1
         screws_by_rail[rid] = screws_by_rail.get(rid, 0) + int(e["payload"].get("screw_count", 0))
 
+    sleepers_reg = getattr(state, "_rail_sleepers", {})
     rails = []
     for rid in sorted(uow.rail.rows):
         row = uow.rail.rows[rid]
         length = getattr(row, "length_mm", None)
+        # Для COMPLETED берём сохранённые в рельсе значения (реестр позиций к этому
+        # моменту очищен); для IN_PROGRESS — из живого реестра состояния.
+        positions = sorted(int(s["pos"]) for s in sleepers_reg.get(rid, []))
+        persisted_sleepers = getattr(row, "sleepers", None)
+        persisted_spacing = getattr(row, "sleeper_spacing_mm", None)
+        if positions:
+            uniq = len(positions)
+            spacing_mm = round((positions[-1] - positions[0]) / (uniq - 1)) if uniq > 1 else None
+        else:
+            uniq = int(persisted_sleepers) if persisted_sleepers else 0
+            spacing_mm = int(persisted_spacing) if persisted_spacing else None
         rails.append(
             {
                 "rail_id": rid,
                 "status": str(getattr(row, "status", "IN_PROGRESS")),
                 "length_mm": length,
                 "length_class": classify_length_mm(length) if isinstance(length, int) else None,
-                "sleepers_эпюра": getattr(row, "sleepers", None),
+                "sleepers_эпюра": getattr(row, "sleepers", None) or (uniq or None),
+                "уник_шпал": uniq,
+                "шаг_см": round(spacing_mm / 10, 1) if spacing_mm else None,
                 "screws": uow.screw.by_rail.get(rid, 0),
                 "tightening_cycles": cycles_by_rail.get(rid, 0),
                 "side": str(getattr(row, "side", "")) or None,
@@ -475,15 +489,18 @@ def print_report(report, *, show_events=False):
         print(f"Перекос часов потоков (received−event, тут=0 т.к. реплей): {sk}")
 
     print("\nРЕЛЬСЫ (по порядку создания):")
-    print(f"{'id':>4} {'статус':<12} {'длина,мм':>9} {'класс':<8} {'эпюра':>6} {'гайки':>6} {'циклы':>6}")
-    print("-" * 60)
+    print(
+        f"{'id':>4} {'статус':<12} {'длина,мм':>9} {'уник.шпал':>9} {'шаг,см':>7} "
+        f"{'циклы':>6} {'гайки(БД)':>9}"
+    )
+    print("-" * 64)
     for r in report["rails"]:
         ln = r["length_mm"] if r["length_mm"] is not None else "—"
-        ep = r["sleepers_эпюра"] if r["sleepers_эпюра"] is not None else "—"
-        cls = r["length_class"] or "—"
+        uniq = r["уник_шпал"] or "—"
+        step = r["шаг_см"] if r["шаг_см"] is not None else "—"
         print(
-            f"{r['rail_id']:>4} {r['status']:<12} {str(ln):>9} {cls:<8} {str(ep):>6} "
-            f"{r['screws']:>6} {r['tightening_cycles']:>6}"
+            f"{r['rail_id']:>4} {r['status']:<12} {str(ln):>9} {str(uniq):>9} {str(step):>7} "
+            f"{r['tightening_cycles']:>6} {r['screws']:>9}"
         )
 
     if show_events:

@@ -310,6 +310,40 @@ class SensorService(BaseService):
     def _rail_session_for_modbus(self, rail_id: int) -> RailSession | None:
         return self.state.find_rail_session(rail_id)
 
+    async def _open_orphan_rail_at_post2(self, ts: datetime) -> int:
+        """Создаёт РШР, пропустившую пост 1 (рельс положили между постами).
+
+        На посту 1 рельса не было → РШР не открылась, FIFO пуст. На посту 2 идёт
+        реальная закрутка по физически присутствующему рельсу. Запись рождается
+        сразу как `rail_at_post2`, поэтому гайки и геометрия поста 2 (R/T) пишутся
+        штатно. Геометрии/длины поста 1 нет: длину доберём с энкодера поста 2
+        (см. process_second_sensor1_data), факт помечаем замечанием при finalize.
+        """
+        rail = await self.uow.rail.add(Rail(start_time=ts))
+        session = RailSession(
+            rail_id=rail.rail_id,
+            start_time=ts,
+            end_time=None,
+            last_mm_along_rail=0,
+            last_timestamp=ts,
+            start_mm_along_rail=0,
+            from_post2=True,
+        )
+        # Живёт как рельс на посту 2 (waiting + rail_at_post2) — тот же приём, что в
+        # rehydrate_in_progress_rails. find_rail_session/_modbus_target_rail_id найдут её.
+        self.state.park_at_post2(session)
+        post2 = self.state.post2_tracker()
+        post2.remove_from_fifo(rail.rail_id)
+        post2.rail_at_post2 = rail.rail_id
+        await emit_pipeline_event(
+            "rshr_opened",
+            rshr_id=rail.rail_id,
+            event_ts=ts,
+            summary=f"Открыт РШР #{rail.rail_id} на посту 2 (пропустил пост 1)",
+            payload={"origin": "post2", "no_post1_geometry": True},
+        )
+        return rail.rail_id
+
     async def add_sensor2_data(self, sensor2_data: Sensor2Create) -> None:
         await cache_dashboard_env_stats(
             self.redis,
@@ -319,14 +353,30 @@ class SensorService(BaseService):
 
         rail_id = self._modbus_target_rail_id(for_modbus=True)
         if rail_id is None:
-            self.state.mark_modbus_skipped_no_post2()
-            await emit_pipeline_event(
-                "modbus_skipped",
-                event_ts=sensor2_data.timestamp,
-                summary="Modbus: нет РШР на посту 2",
-                payload={"reason": "no_post2_rail"},
-            )
-            return
+            # РШР, пропустившая пост 1: рельс положили между постами, на посту 1 его
+            # не было (laser_on_rail=False → не открылся, FIFO пуст). Но на посту 2 он
+            # физически есть (лазер горит) и его реально закручивают (моменты M1–M4).
+            # Рождаем «сироту» здесь, иначе вся закрутка молча теряется (modbus_skipped).
+            # Триггер по моменту, а не по лазеру: закрутку подделать нельзя → нет
+            # пустых записей от мигания. Только при ПУСТОМ FIFO: иначе рельс уже едет
+            # с поста 1 и ждёт подтверждения сегмента поста 2 (rail_at_post2 ещё None
+            # первые ~3 с / 200 мм) — там нельзя плодить дубль, его подхватит штатный
+            # _confirm_post2_segment.
+            if (
+                has_moment_activity(sensor2_data.values)
+                and self.state.post2_laser_was_on()
+                and not self.state.post2_tracker().fifo_rail_ids
+            ):
+                rail_id = await self._open_orphan_rail_at_post2(sensor2_data.timestamp)
+            if rail_id is None:
+                self.state.mark_modbus_skipped_no_post2()
+                await emit_pipeline_event(
+                    "modbus_skipped",
+                    event_ts=sensor2_data.timestamp,
+                    summary="Modbus: нет РШР на посту 2",
+                    payload={"reason": "no_post2_rail"},
+                )
+                return
         session = self._rail_session_for_modbus(rail_id)
         if session is None:
             return
@@ -360,49 +410,67 @@ class SensorService(BaseService):
                 self.state.reset_zero_torque_streak()
                 self.state.bump_tightening_cycle(values)
         elif has_moment_activity(values):
-            if self.state.within_inter_cycle_debounce(
-                rail_id, sensor2_data.timestamp, TIMING_CONFIG.min_inter_cycle_sec
-            ):
-                # Повторный импульс момента в пределах MIN_INTER_CYCLE_SEC после конца
-                # прошлого цикла на том же рельсе — доворот той же шпалы, а не новый
-                # цикл. Не плодим вторую закрутку («2 закрутки с быстрым перерывом»).
-                pass
-            else:
-                self.state.start_tightening_cycle(rail_id, session.last_mm_along_rail, values)
-                await emit_pipeline_event(
-                    "tightening_started",
-                    rshr_id=rail_id,
-                    event_ts=sensor2_data.timestamp,
-                    summary=f"Начало закрутки РШР #{rail_id}",
-                    payload={"mm_along_rail": session.last_mm_along_rail},
-                )
+            # Позиция шпалы = живой mm поста 2 (а не замороженный mm поста 1, который
+            # был одинаков у всех циклов). По ней потом отличаем повтор от новой шпалы.
+            sleeper_mm = self.state.get_post2_current_mm()
+            if sleeper_mm is None:
+                sleeper_mm = session.last_mm_along_rail
+            self.state.start_tightening_cycle(rail_id, sleeper_mm, values)
+            await emit_pipeline_event(
+                "tightening_started",
+                rshr_id=rail_id,
+                event_ts=sensor2_data.timestamp,
+                summary=f"Начало закрутки РШР #{rail_id}",
+                payload={"mm_along_rail": sleeper_mm},
+            )
         await self._publish_post2_stages(session)
         return
 
     async def _finalize_tightening_cycle(self, ts: datetime, session: RailSession) -> None:
-        """Завершение цикла: 4 гайки (M1–M4) одновременно, по max моменту и частоте."""
+        """Завершение цикла: 4 гайки (M1–M4) одной шпалы.
+
+        Если шпала на этой позиции (по mm поста 2) уже закручивалась — это ПОВТОРНАЯ
+        закрутка той же шпалы: ОБНОВЛЯЕМ значения тех же гаек, а не создаём дубль
+        (иначе эпюра/количество шпал завышается). Новая позиция → новая шпала.
+        """
         cycle = self.state.finish_tightening_cycle()
         base = cycle.last_values or {}
         ft_threshold = await self.get_threshold("frequency_torque")
         errors_to_add: list[Error] = []
         sensors: list[Sensor2] = []
         rail_id = session.rail_id
+        pos = int(cycle.cycle_start_mm)
+        existing = self.state.find_sleeper(rail_id, pos, TIMING_CONFIG.min_sleeper_spacing_mm)
+        is_retighten = existing is not None
         per_channel_torque: dict[int, float] = {}
         per_channel_ok: dict[int, bool] = {}
+        screw_ids: list[int] = []
 
         for ch in range(1, 5):
-            m_key = f"M{ch}"
-            f_key = f"f{ch}"
-            max_m = float(cycle.max_moment.get(m_key, 0.0))
-            max_f = float(cycle.max_freq.get(f_key, 0.0))
-            screw_id = await self.add_screw(
-                max_m,
-                ts,
-                rail_id=rail_id,
-                max_frequency=max_f,
-                mm_along_rail=cycle.cycle_start_mm,
-                channel=ch,
-            )
+            max_m = float(cycle.max_moment.get(f"M{ch}", 0.0))
+            max_f = float(cycle.max_freq.get(f"f{ch}", 0.0))
+            if is_retighten:
+                # Та же шпала: обновляем существующую гайку последними пиками.
+                screw_id = int(existing["screw_ids"][ch - 1])
+                await self.uow.screw.update(
+                    screw_id=screw_id,
+                    max_torque=max_m,
+                    max_frequency=max_f,
+                    mm_along_rail=pos,
+                    status=ScrewStatus.COMPLETED,
+                )
+            else:
+                screw_id = await self.add_screw(
+                    max_m,
+                    ts,
+                    rail_id=rail_id,
+                    max_frequency=max_f,
+                    mm_along_rail=pos,
+                    channel=ch,
+                )
+                await self.uow.screw.update(screw_id=screw_id, status=ScrewStatus.COMPLETED)
+            screw_ids.append(screw_id)
+
             channel_ok = True
             if ft_threshold and (max_m < ft_threshold.min_value or max_m > ft_threshold.max_value):
                 channel_ok = False
@@ -422,7 +490,6 @@ class SensorService(BaseService):
                         is_critical=ft_threshold.is_critical,
                     )
                 )
-            await self.uow.screw.update(screw_id=screw_id, status=ScrewStatus.COMPLETED)
             per_channel_torque[ch] = max_m
             per_channel_ok[ch] = channel_ok
 
@@ -435,6 +502,9 @@ class SensorService(BaseService):
                     row[f"converter_frequency_{other}"] = 0.0
             sensors.append(Sensor2(timestamp=ts, screw_id=screw_id, **row))
 
+        if not is_retighten:
+            self.state.register_sleeper(rail_id, pos, screw_ids)
+
         if errors_to_add:
             await self.uow.error.add_many(errors_to_add)
             for err in errors_to_add:
@@ -446,15 +516,22 @@ class SensorService(BaseService):
                 )
         if sensors:
             await self.uow.sensor2.add_many(sensors)
-        self.state.record_nut_cycle(rail_id, per_channel_torque, per_channel_ok)
-        # Фиксируем конец цикла для дебаунса следующего старта (MIN_INTER_CYCLE_SEC).
-        self.state.mark_cycle_end(rail_id, ts)
+        # Повтор не наращивает счётчик гаек (та же шпала) — только обновляет момент.
+        self.state.record_nut_cycle(
+            rail_id, per_channel_torque, per_channel_ok, increment=not is_retighten
+        )
+        verb = "обновлена" if is_retighten else "новая"
         await emit_pipeline_event(
             "tightening_completed",
             rshr_id=rail_id,
             event_ts=ts,
-            summary=f"Закрутка завершена: {len(sensors)} гаек, РШР #{rail_id}",
-            payload={"screw_count": len(sensors), "errors": len(errors_to_add)},
+            summary=f"Закрутка ({verb} шпала, {pos} мм): 4 гайки, РШР #{rail_id}",
+            payload={
+                "screw_count": len(sensors),
+                "errors": len(errors_to_add),
+                "retighten": is_retighten,
+                "sleeper_mm": pos,
+            },
         )
         await self._publish_post2_stages(session)
 
@@ -757,6 +834,10 @@ class SensorService(BaseService):
         ts = data.timestamp
         current_mm = int(values.mm_along_rail)
 
+        # Живая позиция поста 2 — «адрес шпалы» для текущей закрутки (нужна для
+        # дедупа повторной закрутки той же шпалы). Нет рельса под лазером — None.
+        self.state.set_post2_current_mm(current_mm if on_rail else None)
+
         if on_rail and not was_on:
             # Фронт ON: не выпускаем рельс сразу, открываем кандидата сегмента.
             self.state.set_post2_laser_was_on(True)
@@ -794,6 +875,15 @@ class SensorService(BaseService):
             rail_id = self.state.is_in_closed(data.timestamp)
 
         if rail_id is not None:
+            # Длина РШР-сироты (пропустившей пост 1) берётся с энкодера поста 2 —
+            # геометрии/mm поста 1 у неё нет. Держим last_mm как максимум по горящему
+            # лазеру; finalize посчитает длину как segment_length(0, last_mm).
+            if on_rail:
+                sess = self.state.get_waiting_rail(rail_id)
+                if sess is not None and sess.from_post2:
+                    self.state.update_waiting_progress(
+                        rail_id, max(current_mm, sess.last_mm_along_rail), ts
+                    )
             await self.uow.sensor1.add(
                 Sensor1(rail_id=rail_id, timestamp=data.timestamp, **values.model_dump())
             )
@@ -851,6 +941,45 @@ class SensorService(BaseService):
             await self._finalize_tightening_cycle(ts, session)
         schedule_rail_departure_burst(rail_id)
         await self.finalize_rail(session)
+
+    async def _maybe_close_departed_post2_rail(self, event_ts: datetime) -> None:
+        """Закрывает РШР, ушедшую с поста 2, когда следующего рельса нет.
+
+        Штатно рельс на посту 2 финализируется приходом СЛЕДУЮЩЕГО сегмента
+        (`on_post2_segment_start` → `_depart_rail_from_post2`). Но для последнего
+        рельса смены/партии следующего сегмента не будет, и без этой страховки РШР
+        навсегда висит «В процессе», хотя физически уже уехала (лазер поста 2 погас).
+        Закрываем по grace после стабильного гашения лазера.
+
+        Безопасно для «парковки между сменами»: недокрученный припаркованный рельс
+        лежит ПОД лазером поста 2 (`post2_laser_was_on == True`) либо вовсе без пакетов
+        лазера (`last_laser_off_at is None` после регидрации) — в обоих случаях выходим.
+        Срабатываем только при реальном уходе: лазер был и стабильно погас.
+        """
+        post2 = self.state.post2_tracker()
+        rail_id = post2.rail_at_post2
+        if rail_id is None:
+            return
+        # Рельс ещё под лазером поста 2 (закрутка либо пауза/парковка) — ждём.
+        if self.state.post2_laser_was_on():
+            return
+        if post2.last_laser_off_at is None:
+            return
+        grace = timedelta(seconds=TIMING_CONFIG.post2_depart_grace_sec)
+        if event_ts < post2.last_laser_off_at + grace:
+            return
+        session = self.state.find_rail_session(rail_id)
+        if session is None or session.post2_depart_at is not None:
+            # Закрывать нечего (или уже ушла штатно) — просто снимаем указатель,
+            # чтобы Modbus/закрутка не целились в закрытый рельс.
+            post2.rail_at_post2 = None
+            post2.last_laser_off_at = None
+            return
+        await self._depart_rail_from_post2(rail_id, event_ts)
+        # Преемника нет — освобождаем пост 2 вручную (в штатном пути это делает
+        # on_post2_segment_start, переставляя rail_at_post2 на новый рельс).
+        post2.rail_at_post2 = None
+        post2.last_laser_off_at = None
 
     async def _maybe_close_active_rail(self, event_ts: datetime) -> None:
         active = self.state.get_active_rail()
@@ -945,6 +1074,7 @@ class SensorService(BaseService):
         self.state.clear_screw_session()
         self.state.reset_laser_counts()
         self.state.reset_tightening_cycle()
+        self.state.clear_rail_sleepers(rail_id)
         await self._publish_stages_empty()
 
     async def close_active_rail(self) -> None:
@@ -966,7 +1096,10 @@ class SensorService(BaseService):
             session.traversed_mm,
             segment_length_mm(session.start_mm_along_rail, session.last_mm_along_rail),
         )
-        if length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
+        # Сироту поста 2 (пропустила пост 1) по длине НЕ отбрасываем: длина у неё —
+        # с энкодера поста 2 и может быть неполной, но закрутка реальна (была серия
+        # моментов M1–M4). Иначе удалили бы готовую РШР вместе с гайками.
+        if not session.from_post2 and length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
             await emit_pipeline_event(
                 "rshr_discarded",
                 rshr_id=rail_id,
@@ -1013,16 +1146,44 @@ class SensorService(BaseService):
         screw_count = await self.uow.screw.count_by_rail(rail_id)
         self.state.set_rail_screw_count(rail_id, screw_count)
 
+        if session.from_post2:
+            # Помечаем замечанием: рельс положили между постами, пост 1 он миновал,
+            # геометрического контроля (колея/износ/длина поста 1) по нему нет.
+            await self.uow.error.add(
+                Error(
+                    rail_id=rail_id,
+                    screw_id=None,
+                    value_name="no_post1_geometry",
+                    description="РШР собрана без геометрического контроля (пропущен пост 1)",
+                    unit_of_measurement=None,
+                    value=0.0,
+                    min_value=0.0,
+                    max_value=0.0,
+                    is_critical=False,
+                )
+            )
+
+        # Эпюра = число УНИКАЛЬНЫХ шпал (повторные закрутки одной шпалы не дублируются
+        # на этапе записи, поэтому screw_count уже без дублей). Берём из реестра позиций;
+        # fallback на ceil(screw_count/4) для регидрированных сессий (реестр пуст).
+        positions = self.state.rail_sleeper_positions(rail_id)
         sleepers_value: int | None
-        if screw_count == 0:
-            sleepers_value = None
-        else:
+        sleeper_spacing_mm: int | None = None
+        if positions:
+            sleepers_value = len(positions)
+            if len(positions) > 1:
+                # Среднее расстояние между соседними шпалами: (последняя − первая)/(N−1).
+                sleeper_spacing_mm = round((positions[-1] - positions[0]) / (len(positions) - 1))
+        elif screw_count:
             sleepers_value = math.ceil(screw_count / 4)
+        else:
+            sleepers_value = None
 
         update_kwargs: dict = dict(
             status=RailStatus.COMPLETED,
             end_time=session.last_timestamp,
             sleepers=sleepers_value,
+            sleeper_spacing_mm=sleeper_spacing_mm,
             side=self._resolve_rail_side_from_session(session),
         )
         update_kwargs["length_mm"] = int(length_mm)
@@ -1045,6 +1206,7 @@ class SensorService(BaseService):
         self.state.reset_gauge_stats()
         self.state.reset_laser_counts()
         self.state.reset_tightening_cycle()
+        self.state.clear_rail_sleepers(rail_id)
         await emit_pipeline_event(
             "rshr_closed",
             rshr_id=rail_id,
@@ -1191,6 +1353,9 @@ async def _process_merged_event(state: SensorState, ev: MergedSensorEvent) -> No
                 active = state.get_active_rail()
                 if active:
                     await service._maybe_close_active_rail(ev.event_ts)
+                # Страховка для последнего рельса смены: пост 2 ушёл, преемника нет.
+                # Не зависит от наличия active (он мог уже отъехать/распарковаться).
+                await service._maybe_close_departed_post2_rail(ev.event_ts)
         except Exception:
             logger.exception(
                 "sensor merged worker failed kind=%s event_ts=%s",

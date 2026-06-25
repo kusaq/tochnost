@@ -100,11 +100,13 @@ class SensorState:
         self._res_max: float | None = None
         self._tightening = TighteningCycleState()
         self._tightening_rail_id: int | None = None
-        # Время и рельс окончания последнего цикла закрутки — для дебаунса
-        # MIN_INTER_CYCLE_SEC (живёт на SensorState, а не на TighteningCycleState,
-        # который обнуляется в finish_tightening_cycle).
-        self._last_cycle_end_ts: datetime | None = None
-        self._last_cycle_end_rail_id: int | None = None
+        # Живая позиция поста 2 (mmAlongRail сенсора sid=2) — «адрес шпалы» для
+        # текущей закрутки. None, когда под лазером поста 2 нет рельса.
+        self._post2_current_mm: int | None = None
+        # Реестр шпал по рельсу: rail_id -> [{"pos": мм поста2, "screw_ids": [4]}].
+        # Позволяет распознать повторную закрутку той же шпалы (обновить гайки,
+        # не плодить дубль) и посчитать среднее расстояние между шпалами.
+        self._rail_sleepers: dict[int, list[dict[str, Any]]] = {}
         self._post2 = Post2Tracker()
         self._post2_laser_was_on: bool = False
         self._modbus_skipped_no_post2: int = 0
@@ -207,7 +209,8 @@ class SensorState:
             "stream_skew_sec": dict(self._stream_skew_sec),
             "tightening_active": self._tightening.active,
             "tightening_rail_id": self._tightening_rail_id,
-            "last_cycle_end_ts": self._last_cycle_end_ts.isoformat() if self._last_cycle_end_ts else None,
+            "post2_current_mm": self._post2_current_mm,
+            "sleepers_by_rail": {rid: len(v) for rid, v in self._rail_sleepers.items()},
             "rail_screw_count": dict(self._rail_screw_count),
             "merged_queue_size": self._merged_queue.qsize(),
             "packet_counters": self.packet_counters(),
@@ -381,14 +384,18 @@ class SensorState:
         rail_id: int,
         per_channel_torque: dict[int, float],
         per_channel_ok: dict[int, bool],
+        *,
+        increment: bool = True,
     ) -> None:
-        """Фиксирует завершённый цикл закрутки: +1 гайка на каждый канал, последний момент и статус."""
+        """Фиксирует цикл закрутки: при increment=True +1 гайка на канал; при повторной
+        закрутке той же шпалы (increment=False) только обновляем момент/статус."""
         channels = self._dashboard_nuts.setdefault(
             rail_id, {ch: {"count": 0, "torque": 0.0, "ok": True} for ch in (1, 2, 3, 4)}
         )
         for ch in (1, 2, 3, 4):
             entry = channels[ch]
-            entry["count"] = int(entry["count"]) + 1
+            if increment:
+                entry["count"] = int(entry["count"]) + 1
             entry["torque"] = float(per_channel_torque.get(ch, entry["torque"]))
             entry["ok"] = bool(per_channel_ok.get(ch, True))
 
@@ -466,26 +473,42 @@ class SensorState:
     def reset_tightening_cycle(self) -> None:
         self._tightening = TighteningCycleState()
         self._tightening_rail_id = None
-        self._last_cycle_end_ts = None
-        self._last_cycle_end_rail_id = None
 
     def is_tightening_active(self) -> bool:
         return self._tightening.active
 
-    def mark_cycle_end(self, rail_id: int, ts: datetime) -> None:
-        """Фиксирует конец цикла закрутки для дебаунса следующего старта."""
-        self._last_cycle_end_ts = ts
-        self._last_cycle_end_rail_id = rail_id
+    # --- Позиция поста 2 и реестр шпал (дедуп повторной закрутки) ---
+    def set_post2_current_mm(self, mm: int | None) -> None:
+        self._post2_current_mm = mm
 
-    def within_inter_cycle_debounce(self, rail_id: int, ts: datetime, min_sec: float) -> bool:
-        """True, если новый импульс момента пришёл слишком рано после конца прошлого
-        цикла на ТОМ ЖЕ рельсе — это доворот той же шпалы, а не отдельный цикл."""
-        if min_sec <= 0:
-            return False
-        if self._last_cycle_end_ts is None or self._last_cycle_end_rail_id != rail_id:
-            return False
-        delta = (ts - self._last_cycle_end_ts).total_seconds()
-        return 0 <= delta < min_sec
+    def get_post2_current_mm(self) -> int | None:
+        return self._post2_current_mm
+
+    def find_sleeper(self, rail_id: int, pos: int, threshold_mm: int) -> dict[str, Any] | None:
+        """Ближайшая уже записанная шпала рельса в пределах threshold_mm от pos —
+        значит это та же шпала (повторная закрутка). None — новая шпала."""
+        best = None
+        best_d = threshold_mm
+        for s in self._rail_sleepers.get(rail_id, []):
+            d = abs(int(s["pos"]) - int(pos))
+            if d < best_d:
+                best_d = d
+                best = s
+        return best
+
+    def register_sleeper(self, rail_id: int, pos: int, screw_ids: list[int]) -> None:
+        self._rail_sleepers.setdefault(rail_id, []).append(
+            {"pos": int(pos), "screw_ids": list(screw_ids)}
+        )
+
+    def rail_sleeper_positions(self, rail_id: int) -> list[int]:
+        return sorted(int(s["pos"]) for s in self._rail_sleepers.get(rail_id, []))
+
+    def rail_sleeper_count(self, rail_id: int) -> int:
+        return len(self._rail_sleepers.get(rail_id, []))
+
+    def clear_rail_sleepers(self, rail_id: int) -> None:
+        self._rail_sleepers.pop(rail_id, None)
 
     def start_tightening_cycle(self, rail_id: int, mm_along_rail: int, values: Any) -> None:
         self._tightening_rail_id = rail_id
@@ -635,6 +658,8 @@ class SensorState:
         self.reset_tightening_cycle()
         self._post2 = Post2Tracker()
         self._post2_laser_was_on = False
+        self._post2_current_mm = None
+        self._rail_sleepers.clear()
         self._modbus_skipped_no_post2 = 0
         self._watermarks.clear()
         self._packets_reordered = 0

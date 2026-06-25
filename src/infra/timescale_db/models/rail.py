@@ -38,6 +38,9 @@ class Rail(Base, CreateTimestampMixin):
     object_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     fastening_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sleepers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sleeper_spacing_mm: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Среднее расстояние между шпалами (эпюра), мм"
+    )
     start_time: Mapped[datetime | None] = mapped_column(nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(

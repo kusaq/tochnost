@@ -38,10 +38,11 @@ class RshrTimingConfig:
     tail_grace_sec: float = 120.0
     max_rail_open_sec: float = 3600.0
     cycle_end_zero_packets: int = 2
-    # Мин. пауза между циклами закрутки: повторный импульс момента раньше этого окна
-    # после конца предыдущего цикла — это доворот той же шпалы, а не новый цикл.
-    # Защищает от «2 закрутки с быстрым перерывом» (живой путь, не только offline).
-    min_inter_cycle_sec: float = 5.0
+    # Порог «та же шпала»: если цикл закрутки пришёл в пределах этого расстояния
+    # (по позиции поста 2, mmAlongRail sid=2) от уже записанной шпалы — это повторная
+    # закрутка той же шпалы → обновляем гайки, а не плодим дубль. ~половина шага шпал
+    # (норма 50 шпал/25 м → шаг 500 мм → порог 250 мм).
+    min_sleeper_spacing_mm: int = 250
     reorder_buffer_ms: float = 500.0
     max_late_packet_sec: float = 300.0
     # Отбрасывать «старые» пакеты по абсолютному возрасту (received_at − event_ts)?
@@ -52,6 +53,12 @@ class RshrTimingConfig:
     max_tightening_window_sec: float = 180.0
     # Мин. длительность импульса лазера post2 (отсекает ложный depart)
     post2_min_segment_sec: float = 3.0
+    # Сколько лазер поста 2 должен быть погашен, чтобы закрыть текущий rail_at_post2
+    # БЕЗ следующего сегмента (последний рельс смены/партии). Штатно рельс закрывается
+    # приходом следующей РШР; без этой страховки последний РШР висит «В процессе».
+    # Должен быть заметно больше типового зазора лазера между соседними рельсами,
+    # чтобы реальный преемник закрыл предыдущий штатным путём (с передачей FIFO).
+    post2_depart_grace_sec: float = 120.0
     # Макс. длительность проезда post1 (лазер ON→OFF); дольше — мусор, не в FIFO/post2
     post1_max_pass_sec: float = 2400.0
     # Мин. продвижение mm_along_rail для подтверждения реального РШР (отсекает руку под лазером)
@@ -70,13 +77,14 @@ class RshrTimingConfig:
             tail_grace_sec=_env_float("TAIL_GRACE_SEC", 120.0),
             max_rail_open_sec=_env_float("MAX_RAIL_OPEN_SEC", 3600.0),
             cycle_end_zero_packets=_env_int("CYCLE_END_ZERO_PACKETS", 2),
-            min_inter_cycle_sec=_env_float("MIN_INTER_CYCLE_SEC", 5.0),
+            min_sleeper_spacing_mm=_env_int("MIN_SLEEPER_SPACING_MM", 250),
             reorder_buffer_ms=_env_float("REORDER_BUFFER_MS", 500.0),
             max_late_packet_sec=_env_float("MAX_LATE_PACKET_SEC", 300.0),
             drop_stale_by_received_at=_env_bool("DROP_STALE_BY_RECEIVED_AT", False),
             late_append_grace_sec=_env_float("LATE_APPEND_GRACE_SEC", 180.0),
             max_tightening_window_sec=_env_float("MAX_TIGHTENING_WINDOW_SEC", 180.0),
             post2_min_segment_sec=_env_float("POST2_MIN_SEGMENT_SEC", 3.0),
+            post2_depart_grace_sec=_env_float("POST2_DEPART_GRACE_SEC", 120.0),
             post1_max_pass_sec=_env_float("POST1_MAX_PASS_SEC", 2400.0),
             laser_confirm_advance_mm=_env_int("LASER_CONFIRM_ADVANCE_MM", 200),
             post1_min_laser_off_sec=_env_float("POST1_MIN_LASER_OFF_SEC", 1.5),
@@ -90,7 +98,6 @@ class RshrTimingConfig:
         return cls(
             reorder_buffer_ms=0.0,
             cycle_end_zero_packets=1,
-            min_inter_cycle_sec=0.0,
             max_late_packet_sec=float("inf"),
         )
 

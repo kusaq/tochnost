@@ -12,6 +12,9 @@ class RailRead(BaseModel):
     object_name: str | None = Field(default=None, description="Название объекта")
     fastening_type: str | None = Field(default=None, description="Тип крепления")
     sleepers: int | None = Field(default=None, description="Количество шпал")
+    sleeper_spacing_mm: int | None = Field(
+        default=None, description="Эпюра: среднее расстояние между шпалами, мм"
+    )
     start_time: datetime | None = Field(default=None, description="Время начала обработки рельсы")
     end_time: datetime | None = Field(default=None, description="Время окончания обработки рельсы")
     created_at: datetime | None = Field(default=None, description="Время создания записи")

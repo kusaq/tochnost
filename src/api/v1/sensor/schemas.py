@@ -31,6 +31,10 @@ class RailSession:
     post2_depart_at: datetime | None = None
     laser_left_count: int = 0
     laser_right_count: int = 0
+    # РШР родилась на посту 2: рельс положили между постами, пост 1 его не видел
+    # (laser_on_rail=False → не открылся), геометрии/длины поста 1 у неё нет.
+    # Закрутка реальна → запись не удаляем по правилу «< 15 м» (см. finalize_rail).
+    from_post2: bool = False
 
 
 class Sensor1Values(BaseModel):
