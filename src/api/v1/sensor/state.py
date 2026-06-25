@@ -100,11 +100,19 @@ class SensorState:
         self._res_max: float | None = None
         self._tightening = TighteningCycleState()
         self._tightening_rail_id: int | None = None
+        # Время и рельс окончания последнего цикла закрутки — для дебаунса
+        # MIN_INTER_CYCLE_SEC (живёт на SensorState, а не на TighteningCycleState,
+        # который обнуляется в finish_tightening_cycle).
+        self._last_cycle_end_ts: datetime | None = None
+        self._last_cycle_end_rail_id: int | None = None
         self._post2 = Post2Tracker()
         self._post2_laser_was_on: bool = False
         self._modbus_skipped_no_post2: int = 0
         self._fsm_lock = asyncio.Lock()
         self._watermarks: dict[str, datetime] = {}
+        # Перекос часов потока: received_at(сервер) − event_ts(устройство), по ключу потока.
+        # Для диагностики дрейфа NTP на сканере/ПЛК (см. предупреждение в CLAUDE.md).
+        self._stream_skew_sec: dict[str, float] = {}
         self._packets_reordered: int = 0
         self._packets_late_append: int = 0
         self._packets_stale: int = 0
@@ -144,6 +152,9 @@ class SensorState:
 
     def mark_packet_late_append(self) -> None:
         self._packets_late_append += 1
+
+    def record_stream_skew(self, key: str, skew_sec: float) -> None:
+        self._stream_skew_sec[key] = skew_sec
 
     def mark_packet_stale(self) -> None:
         self._packets_stale += 1
@@ -193,8 +204,10 @@ class SensorState:
             "post2_laser_was_on": self._post2_laser_was_on,
             "watermarks": {key: ts.isoformat() for key, ts in self._watermarks.items()},
             "watermark": self.get_watermark().isoformat() if self.get_watermark() else None,
+            "stream_skew_sec": dict(self._stream_skew_sec),
             "tightening_active": self._tightening.active,
             "tightening_rail_id": self._tightening_rail_id,
+            "last_cycle_end_ts": self._last_cycle_end_ts.isoformat() if self._last_cycle_end_ts else None,
             "rail_screw_count": dict(self._rail_screw_count),
             "merged_queue_size": self._merged_queue.qsize(),
             "packet_counters": self.packet_counters(),
@@ -250,6 +263,12 @@ class SensorState:
 
     def update_active_progress(self, mm_along_rail: int, ts: datetime) -> None:
         if self._active:
+            # Накопление пройденного пути: складываем только положительные приращения.
+            # Сброс энкодера в 0 при мигании лазера даёт отрицательную дельту → её
+            # игнорируем, и длина не теряется (сегменты сшиваются через сброс).
+            delta = mm_along_rail - self._active.last_mm_along_rail
+            if delta > 0:
+                self._active.traversed_mm += delta
             self._active.last_mm_along_rail = mm_along_rail
             self._active.last_timestamp = ts
 
@@ -447,9 +466,26 @@ class SensorState:
     def reset_tightening_cycle(self) -> None:
         self._tightening = TighteningCycleState()
         self._tightening_rail_id = None
+        self._last_cycle_end_ts = None
+        self._last_cycle_end_rail_id = None
 
     def is_tightening_active(self) -> bool:
         return self._tightening.active
+
+    def mark_cycle_end(self, rail_id: int, ts: datetime) -> None:
+        """Фиксирует конец цикла закрутки для дебаунса следующего старта."""
+        self._last_cycle_end_ts = ts
+        self._last_cycle_end_rail_id = rail_id
+
+    def within_inter_cycle_debounce(self, rail_id: int, ts: datetime, min_sec: float) -> bool:
+        """True, если новый импульс момента пришёл слишком рано после конца прошлого
+        цикла на ТОМ ЖЕ рельсе — это доворот той же шпалы, а не отдельный цикл."""
+        if min_sec <= 0:
+            return False
+        if self._last_cycle_end_ts is None or self._last_cycle_end_rail_id != rail_id:
+            return False
+        delta = (ts - self._last_cycle_end_ts).total_seconds()
+        return 0 <= delta < min_sec
 
     def start_tightening_cycle(self, rail_id: int, mm_along_rail: int, values: Any) -> None:
         self._tightening_rail_id = rail_id

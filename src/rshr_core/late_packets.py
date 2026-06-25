@@ -49,8 +49,12 @@ def classify_late_packet(
     rail_end = _naive_utc(rail_end)
     now = _naive_utc(now) or datetime.utcnow()
 
-    if config.max_late_packet_sec != float("inf"):
-        # Задержка доставки (received_at − event_ts), а не расхождение часов ПЛК.
+    if config.drop_stale_by_received_at and config.max_late_packet_sec != float("inf"):
+        # ВНИМАНИЕ: age = received_at(сервер) − event_ts(устройство) включает В СЕБЯ
+        # дрейф часов ПЛК/сканера, а не только задержку доставки. Поэтому по умолчанию
+        # этот отброс ВЫКЛЮЧЕН (drop_stale_by_received_at=False) — иначе рассинхрон NTP
+        # глушил бы весь поток. Защита от реального out-of-order — ниже, по per-stream
+        # watermark (он дрейф-инвариантен). Включать только при гарантированном NTP.
         age_sec = (now - event_ts).total_seconds()
         if age_sec > config.max_late_packet_sec:
             return LatePacketPolicy.STALE

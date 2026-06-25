@@ -22,6 +22,11 @@ class RailSession:
     last_mm_along_rail: int
     last_timestamp: datetime
     start_mm_along_rail: int = 0
+    # Суммарный пройденный путь (накопление прямых приращений mmAlongRail) за проход
+    # поста 1. Длина РШР считается по нему, а НЕ по last−start: при мигании лазера
+    # энкодер сбрасывает mmAlongRail в 0, поэтому одиночный сегмент обрезал бы длину.
+    # Накопление только положительных дельт корректно сшивает сегменты через сбросы.
+    traversed_mm: int = 0
     laser_off_at: datetime | None = None
     post2_depart_at: datetime | None = None
     laser_left_count: int = 0

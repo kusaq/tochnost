@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import heapq
 import logging
 import math
@@ -360,14 +360,22 @@ class SensorService(BaseService):
                 self.state.reset_zero_torque_streak()
                 self.state.bump_tightening_cycle(values)
         elif has_moment_activity(values):
-            self.state.start_tightening_cycle(rail_id, session.last_mm_along_rail, values)
-            await emit_pipeline_event(
-                "tightening_started",
-                rshr_id=rail_id,
-                event_ts=sensor2_data.timestamp,
-                summary=f"Начало закрутки РШР #{rail_id}",
-                payload={"mm_along_rail": session.last_mm_along_rail},
-            )
+            if self.state.within_inter_cycle_debounce(
+                rail_id, sensor2_data.timestamp, TIMING_CONFIG.min_inter_cycle_sec
+            ):
+                # Повторный импульс момента в пределах MIN_INTER_CYCLE_SEC после конца
+                # прошлого цикла на том же рельсе — доворот той же шпалы, а не новый
+                # цикл. Не плодим вторую закрутку («2 закрутки с быстрым перерывом»).
+                pass
+            else:
+                self.state.start_tightening_cycle(rail_id, session.last_mm_along_rail, values)
+                await emit_pipeline_event(
+                    "tightening_started",
+                    rshr_id=rail_id,
+                    event_ts=sensor2_data.timestamp,
+                    summary=f"Начало закрутки РШР #{rail_id}",
+                    payload={"mm_along_rail": session.last_mm_along_rail},
+                )
         await self._publish_post2_stages(session)
         return
 
@@ -439,6 +447,8 @@ class SensorService(BaseService):
         if sensors:
             await self.uow.sensor2.add_many(sensors)
         self.state.record_nut_cycle(rail_id, per_channel_torque, per_channel_ok)
+        # Фиксируем конец цикла для дебаунса следующего старта (MIN_INTER_CYCLE_SEC).
+        self.state.mark_cycle_end(rail_id, ts)
         await emit_pipeline_event(
             "tightening_completed",
             rshr_id=rail_id,
@@ -499,9 +509,15 @@ class SensorService(BaseService):
             return False
         if self._active_rail_transferred_to_post2(active):
             return True
-        # Новый рельс распознаём только по реальному сбросу mm к ~0.
-        # Раньше тут было `laser_off_at is not None`, но из-за этого кратковременное
-        # мигание лазера (рука) раскалывало один рельс на два.
+        # Дебаунс мигания лазера: если лазер пропадал лишь на доли секунды
+        # (< POST1_MIN_LASER_OFF_SEC), возврат лазера + сброс mm энкодером — это глитч
+        # на ОДНОМ рельсе, а не приход нового. Не раскалываем (фикс фантомных РШР).
+        if active.laser_off_at is not None:
+            off_sec = (data.timestamp - active.laser_off_at).total_seconds()
+            if 0 <= off_sec < TIMING_CONFIG.post1_min_laser_off_sec:
+                return False
+        # Новый рельс распознаём только по реальному сбросу mm к ~0 после достаточно
+        # долгого пропадания лазера (а не по мигающему лазеру — инвариант №6).
         return self._is_mm_reset_for_new_rail(active, int(data.values.mm_along_rail))
 
     async def _handoff_active_from_post1(self, active: RailSession, ts: datetime) -> None:
@@ -907,6 +923,7 @@ class SensorService(BaseService):
             payload={
                 "start_mm": active.start_mm_along_rail,
                 "end_mm": active.last_mm_along_rail,
+                "length_mm": active.traversed_mm,
                 "fifo": list(self.state.post2_tracker().fifo_rail_ids),
             },
         )
@@ -943,7 +960,12 @@ class SensorService(BaseService):
             self.state.clear_active()
         self.state.pop_waiting_rail(rail_id)
 
-        length_mm = segment_length_mm(session.start_mm_along_rail, session.last_mm_along_rail)
+        # Длина — по накопленному пути (сшивает сегменты через сбросы энкодера при
+        # мигании лазера). Fallback на last−start для регидрированных сессий (traversed=0).
+        length_mm = max(
+            session.traversed_mm,
+            segment_length_mm(session.start_mm_along_rail, session.last_mm_along_rail),
+        )
         if length_mm < self.RSHR_LENGTH_DISCARD_BELOW_MM:
             await emit_pipeline_event(
                 "rshr_discarded",
@@ -1220,11 +1242,35 @@ async def _sensor_merged_worker(state: SensorState) -> None:
             state.merged_queue().task_done()
 
 
+def _stream_skew_seconds(received_at: datetime, event_ts: datetime) -> float | None:
+    """received_at(сервер) − event_ts(устройство), tz-безопасно. Метрика дрейфа NTP."""
+    def naive(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+    r, e = naive(received_at), naive(event_ts)
+    if r is None or e is None:
+        return None
+    return (r - e).total_seconds()
+
+
 async def _handle_merged_event(state: SensorState, ev: MergedSensorEvent) -> None:
     watermark_key = _event_watermark_key(ev)
     current_wm = state.get_watermark(watermark_key)
     if current_wm is not None and ev.event_ts < current_wm:
         state.mark_packet_reordered()
+
+    # Метрика перекоса часов потока (дрейф NTP на сканере/ПЛК) — для диагностики.
+    skew = _stream_skew_seconds(ev.received_at, ev.event_ts)
+    if skew is not None:
+        state.record_stream_skew(watermark_key, round(skew, 1))
+        if abs(skew) > TIMING_CONFIG.max_late_packet_sec / 2:
+            logger.warning(
+                "clock skew %.0fs on stream %s (NTP drift на сканере/ПЛК?)",
+                skew,
+                watermark_key,
+            )
 
     closed_rail_id = state.is_in_closed(ev.event_ts)
     closed_session = state.find_closed_rail(closed_rail_id) if closed_rail_id is not None else None
