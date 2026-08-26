@@ -1,3 +1,4 @@
+import heapq
 import os
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -57,6 +58,11 @@ class StoredStreamEvent:
     rshr_id: int | None = None
     correlation_id: str | None = None
     summary: str | None = None
+    # rshr_id проставлен по снимку FSM на момент ПРИЁМА пакета, а не решением
+    # FSM при обработке. Между приёмом и обработкой лежит буфер
+    # переупорядочивания, поэтому привязка приблизительная — на разборе
+    # инцидента её нельзя принимать за истину (ср. INV-2).
+    rshr_id_provisional: bool = False
 
 
 @dataclass(slots=True)
@@ -172,6 +178,7 @@ class StreamMonitorState:
         rshr_id: int | None = None,
         correlation_id: str | None = None,
         summary: str | None = None,
+        rshr_id_provisional: bool = False,
     ) -> StoredStreamEvent:
         now = _as_utc(received_at) if received_at else datetime.now(timezone.utc)
         if correlation_id is None and rshr_id is not None:
@@ -189,6 +196,7 @@ class StreamMonitorState:
                 rshr_id=rshr_id,
                 correlation_id=correlation_id,
                 summary=summary,
+                rshr_id_provisional=rshr_id_provisional,
             )
             self._events.append(event)
             if event_type not in RAW_EVENT_TYPES:
@@ -250,8 +258,18 @@ class StreamMonitorState:
             or source == "pipeline"
             or (event_type is not None and event_type not in RAW_EVENT_TYPES)
         )
-        base = self._pipeline_events if pipeline_query else self._events
-        items = list(base)
+        if pipeline_query:
+            items = list(self._pipeline_events)
+            if rshr_id is not None or correlation_id is not None:
+                # Сырым пакетам РШР проставляется на приёме, поэтому «показать
+                # всё по РШР 42» обязано доставать и их. Оба буфера упорядочены
+                # по id, дубли (pipeline-события лежат в обоих) отсеиваем.
+                seen = {ev.id for ev in items}
+                extra = [ev for ev in self._events if ev.id not in seen]
+                if extra:
+                    items = list(heapq.merge(items, extra, key=lambda ev: ev.id))
+        else:
+            items = list(self._events)
         if source:
             items = [ev for ev in items if ev.source == source]
         if event_type:
@@ -358,6 +376,7 @@ def event_to_dict(event: StoredStreamEvent) -> dict[str, Any]:
         "rshr_id": event.rshr_id,
         "correlation_id": event.correlation_id,
         "summary": event.summary,
+        "rshr_id_provisional": event.rshr_id_provisional,
     }
 
 

@@ -24,6 +24,7 @@ class StreamEventRead(BaseModel):
     rshr_id: int | None = None
     correlation_id: str | None = None
     summary: str | None = None
+    rshr_id_provisional: bool = False
 
 
 class SensorHealthRead(BaseModel):

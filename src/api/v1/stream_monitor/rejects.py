@@ -173,9 +173,15 @@ async def record_rejected_request(
         "throttle_window_sec": REJECT_WINDOW_SEC,
     }
 
+    # Какая РШР была в работе, когда контракт поехал. Приблизительно (снимок FSM
+    # на момент приёма) — отсюда rshr_id_provisional.
+    rail_id = stream_monitor.rail_at_ingest(source)
+
     await stream_monitor.record_event(
         source=source,
         payload=payload,
         event_type=REJECT_EVENT_TYPE,
         summary=_summary(method, path, errors, repeat_count),
+        rshr_id=rail_id,
+        rshr_id_provisional=rail_id is not None,
     )

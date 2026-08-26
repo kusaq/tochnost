@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from api.v1.sensor.state import MergedSensorEvent
+from api.v1.sensor.state import SENSOR_STATE, MergedSensorEvent
 from api.v1.stream_monitor.state import STREAM_MONITOR_STATE, StoredStreamEvent, event_to_dict
 
 
@@ -19,6 +19,7 @@ class StreamMonitorService:
         rshr_id: int | None = None,
         correlation_id: str | None = None,
         summary: str | None = None,
+        rshr_id_provisional: bool = False,
     ) -> StoredStreamEvent:
         return await self._state.add_event(
             source=source,
@@ -28,6 +29,7 @@ class StreamMonitorService:
             rshr_id=rshr_id,
             correlation_id=correlation_id,
             summary=summary,
+            rshr_id_provisional=rshr_id_provisional,
         )
 
     async def record_pipeline_event(
@@ -49,6 +51,26 @@ class StreamMonitorService:
             summary=summary,
         )
 
+    @staticmethod
+    def rail_at_ingest(source: str) -> int | None:
+        """РШР по снимку FSM на момент приёма пакета.
+
+        Повторяет правила привязки самого FSM, без фолбэков: пост 1 — активная
+        рельса, пост 2 и Modbus — только `rail_at_post2` (INV-2). Значение
+        приблизительное: между приёмом и обработкой лежит буфер
+        переупорядочивания, поэтому события помечаются `rshr_id_provisional`.
+        Читаем состояние, не меняем — на поведение FSM это не влияет.
+        """
+        try:
+            if source == "sensor1_post1":
+                active = SENSOR_STATE.get_active_rail()
+                return active.rail_id if active else None
+            if source in ("sensor1_post2", "modbus"):
+                return SENSOR_STATE.post2_tracker().rail_at_post2
+        except Exception:
+            return None
+        return None
+
     async def record_merged_sensor_event(self, event: MergedSensorEvent) -> StoredStreamEvent:
         if hasattr(event.payload, "model_dump"):
             payload = event.payload.model_dump(mode="json")
@@ -67,10 +89,14 @@ class StreamMonitorService:
         if laser_left is not None:
             summary = f"{summary or ''} laser L={laser_left}".strip()
 
+        rail_id = self.rail_at_ingest(source)
+
         return await self._state.add_event(
             source=source,
             event_type="sensor_raw",
             payload=payload,
+            rshr_id=rail_id,
+            rshr_id_provisional=rail_id is not None,
             event_ts=event.event_ts,
             received_at=event.received_at,
             summary=summary or "Сырые данные датчика",
