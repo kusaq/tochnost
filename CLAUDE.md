@@ -1,7 +1,13 @@
 # tochnost — backend РЖД (FastAPI)
 
-> Полный контекст проекта: `../docs/AI_ONBOARDING.md`. Планы: `../docs/plans/`.
-> Этот репозиторий деплоится из ветки **`dev`** (порт 8000). Фронтенд — отдельный репо `../rzd` (ветка `main`).
+> **Источник правды по поведению — [SPEC.md](SPEC.md).** Обоснования инвариантов — [docs/adr/](docs/adr/).
+> Полный контекст: [docs/AI_ONBOARDING.md](docs/AI_ONBOARDING.md). Планы: [docs/plans/](docs/plans/). Термины: [docs/GLOSSARY.md](docs/GLOSSARY.md).
+> Этот репозиторий деплоится из ветки **`dev`** (порт 8000). Фронтенд — отдельный репо `rzd` (ветка `main`).
+> `docs/` и `SPEC.md` — зеркало корневого harness (канон в рабочей папке `RZD APPS/`; синхронизация `scripts/sync-harness.sh`).
+
+## Терминология
+- **Число шпал** (`sleepers` = `ceil(гайки/4)`, ~50) — то, что считает система.
+- **Эпюра** — расстояние между шпалами; ⚠️ **не** количество шпал (UI-колонка «Эпюра» показывает число шпал — историческое имя).
 
 ## Где что
 - `src/server/server.py` — FastAPI app, `lifespan` (запускает worker'ы)
@@ -16,7 +22,7 @@
 ## Критичные инварианты FSM (подробно — в онбординге, разделы 6–8)
 1. Пост 1 — только `park_active_for_post2()`, никогда `close_active_rail`. `finalize_rail` только на посту 2.
 2. Гайки — только на `rail_at_post2` (`_modbus_target_rail_id`), не на `get_active_rail()`.
-3. Эпюра = `ceil(гайки/4)` при finalize; для `IN_PROGRESS` UI показывает «—».
+3. Число шпал = `ceil(гайки/4)` при finalize; для `IN_PROGRESS` UI показывает «—» (колонка называется «Эпюра»).
 4. Per-stream watermark (`s1:1`, `s1:2`, `s2`) — не общий.
 5. Старт цикла: M1–M4 + пауза `MIN_INTER_CYCLE_SEC=7`; конец: `CYCLE_END_ZERO_PACKETS=2`.
 6. Открытие РШР: подтверждение движением `LASER_CONFIRM_ADVANCE_MM=200`.
