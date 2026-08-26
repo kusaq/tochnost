@@ -32,6 +32,7 @@ class SensorHealthRead(BaseModel):
     last_seen_at: datetime | None = None
     events_count: int
     events_last_minute: int
+    rejected_count: int = 0
     is_stale: bool
     is_healthy: bool
     stale_after_sec: int
@@ -46,6 +47,7 @@ class StreamMonitorStats(BaseModel):
     subscribers: int
     by_source: dict[str, int]
     by_event_type: dict[str, int] = Field(default_factory=dict)
+    rejected_by_source: dict[str, int] = Field(default_factory=dict)
     last_received_at: datetime | None = None
     sensor_health: list[SensorHealthRead] = Field(default_factory=list)
     stale_after_sec: int = 30

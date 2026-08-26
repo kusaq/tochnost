@@ -33,6 +33,11 @@ MAX_EVENTS = _env_int("STREAM_MONITOR_MAX_EVENTS", 5000)
 MAX_PIPELINE_EVENTS = _env_int("STREAM_MONITOR_MAX_PIPELINE_EVENTS", 20000)
 # Типы событий, которые НЕ относятся к pipeline (не попадают в durable-буфер).
 RAW_EVENT_TYPES = frozenset({"sensor_raw"})
+# Типы, которые НЕ считаются признаком жизни датчика. Отклонённый (422) пакет
+# приходит с тем же source, что и валидный, но данных не несёт: если дать ему
+# трогать health, карточка позеленеет при полностью мёртвом потоке — ровно в тот
+# момент, когда разъехавшийся контракт надо заметить.
+HEALTH_EXCLUDED_TYPES = frozenset({"ingest_rejected"})
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -85,6 +90,9 @@ class StreamMonitorState:
         self._total_received = 0
         self._by_source: Counter[str] = Counter()
         self._by_event_type: Counter[str] = Counter()
+        # Отклонённые запросы копятся ПОШТУЧНО, без троттлинга: событий в ленте
+        # мало (дедуп по сигнатуре), а масштаб беды виден только по счётчику.
+        self._rejected_by_source: Counter[str] = Counter()
         self._last_received_at: datetime | None = None
         self._sensor_health: dict[str, SensorHealthRecord] = {
             "sensor1_post1": SensorHealthRecord(source="sensor1_post1", label="Датчик 1 · пост 1"),
@@ -115,6 +123,15 @@ class StreamMonitorState:
             self._sensor_recent_ts[source].popleft()
         rec.events_last_minute = len(self._sensor_recent_ts[source])
 
+    def note_rejected(self, source: str) -> None:
+        """Отметить отклонённый (422) запрос.
+
+        Тикает на КАЖДОМ отклонении, до троттлинга событий: в ленте лежит по
+        одному образцу на сигнатуру, а масштаб («поток мёртв целиком» против
+        «один кривой пакет») виден только по этому счётчику.
+        """
+        self._rejected_by_source[source] += 1
+
     def _is_stale(self, rec: SensorHealthRecord, now: datetime) -> bool:
         if rec.last_seen_at is None:
             return True
@@ -135,6 +152,7 @@ class StreamMonitorState:
                     "last_seen_at": _as_utc(rec.last_seen_at) if rec.last_seen_at else None,
                     "events_count": rec.events_count,
                     "events_last_minute": rec.events_last_minute,
+                    "rejected_count": self._rejected_by_source.get(rec.source, 0),
                     "is_stale": is_stale,
                     "is_healthy": not is_stale,
                     "stale_after_sec": rec.stale_after_sec,
@@ -181,7 +199,7 @@ class StreamMonitorState:
             self._by_source[source] += 1
             self._by_event_type[event_type] += 1
             self._last_received_at = now
-            if source in self._sensor_health:
+            if source in self._sensor_health and event_type not in HEALTH_EXCLUDED_TYPES:
                 self._touch_sensor(source, now)
 
         self._broadcast(event)
@@ -248,6 +266,7 @@ class StreamMonitorState:
                 "post2_unmatched",
                 "packet_stale",
                 "modbus_skipped",
+                "ingest_rejected",
             }
             items = [
                 ev
@@ -280,6 +299,7 @@ class StreamMonitorState:
             "subscribers": len(self._subscribers),
             "by_source": dict(self._by_source),
             "by_event_type": dict(self._by_event_type),
+            "rejected_by_source": dict(self._rejected_by_source),
             "last_received_at": _as_utc(self._last_received_at) if self._last_received_at else None,
             "sensor_health": self.get_sensor_health(),
             "stale_after_sec": STALE_AFTER_SEC,
@@ -318,6 +338,7 @@ class StreamMonitorState:
             self._pipeline_events.clear()
             self._by_source.clear()
             self._by_event_type.clear()
+            self._rejected_by_source.clear()
             for rec in self._sensor_health.values():
                 rec.last_seen_at = None
                 rec.events_count = 0

@@ -13,6 +13,7 @@ from api.v1.stream_monitor.schemas import (
     StreamEventsListResponse,
     StreamMonitorStats,
 )
+from api.v1.stream_monitor.rejects import reject_throttle
 from api.v1.stream_monitor.service import stream_monitor
 from api.v1.stream_monitor.state import STREAM_MONITOR_STATE
 
@@ -215,4 +216,7 @@ async def stream_monitor_ws(websocket: WebSocket) -> None:
 )
 async def clear_stream_events() -> Response:
     await STREAM_MONITOR_STATE.clear()
+    # Иначе после очистки троттл продолжит глушить уже известные ему сигнатуры
+    # и первый отклонённый пакет не появится в пустой ленте.
+    reject_throttle.reset()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

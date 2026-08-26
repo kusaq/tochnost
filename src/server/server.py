@@ -11,6 +11,7 @@ from api.v1.sensor.service import start_sensor_workers, stop_sensor_workers
 from api.v1.camera.service import start_camera_worker, stop_camera_worker
 from core.config import settings
 from core.logging_config import setup_logging
+from server.exception_handlers import init_exception_handlers
 from server.middlewares.auth import SlidingSessionMiddleware
 
 
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     )
     _init_router(_app)
     _init_middleware(_app)
+    init_exception_handlers(_app)
     return _app
 
 
