@@ -27,6 +27,7 @@ from api.v1.sensor.state import SENSOR_STATE
 from api.v1.sensor.tightening import has_moment_activity, all_torque_zero, MOMENT_KEYS, FREQ_KEYS
 from rshr_core.config import RshrTimingConfig
 from rshr_core.rshr_length import segment_length_mm
+from rshr_core.rshr_overhang import overhangs_from_edges
 from rshr_core.late_packets import classify_late_packet, LatePacketPolicy
 from api.v1.stream_monitor.pipeline_hooks import emit_pipeline_event
 from api.v1.rail.fsm import detach_rail_from_sensor_state
@@ -816,8 +817,30 @@ class SensorService(BaseService):
         for data in pending.buffer[1:]:
             await self._apply_sensor1_to_active(data, active)
 
+    @staticmethod
+    def _capture_rail_edges(data: Sensor1Create, session: RailSession | None) -> None:
+        """Запомнить позиции торцов из пакета, если прошивка их прислала.
+
+        Берём последний валидный набор за проход: прошивка заполняет End только
+        после прохода торца, в начале прохода там нули. Старая прошивка полей
+        не шлёт — тогда last_rail_edges остаётся None и забег не считается.
+        """
+        if session is None:
+            return
+        v = data.values
+        edges = (
+            v.mm_rail_start_left,
+            v.mm_rail_start_right,
+            v.mm_rail_end_left,
+            v.mm_rail_end_right,
+        )
+        if any(e is None for e in edges):
+            return
+        session.last_rail_edges = (int(edges[0]), int(edges[1]), int(edges[2]), int(edges[3]))
+
     async def _apply_sensor1_to_active(self, data: Sensor1Create, active: RailSession) -> None:
         """Обработка пакета Sensor1 при активном рельсе и лазере ON."""
+        self._capture_rail_edges(data, active)
         self.state.record_laser_flags(
             left_on_rail=data.values.laser_on_rail_left,
             right_on_rail=data.values.laser_on_rail_right,
@@ -1208,6 +1231,40 @@ class SensorService(BaseService):
                 value=start_value,
             )
 
+        # Забег нитей. Считается только здесь (уход с поста 2) — INV-1.
+        overhang_start, overhang_end = overhangs_from_edges(session.last_rail_edges)
+
+        if overhang_start is not None or overhang_end is not None:
+            th_overhang = await self.get_threshold("mm_overhang")
+            for label, value in (("в начале", overhang_start), ("в конце", overhang_end)):
+                if value is None or th_overhang is None:
+                    continue
+                if th_overhang.min_value <= value <= th_overhang.max_value:
+                    continue
+                description = (
+                    f"Забег {label} РШР {value:+d} мм — вне допуска "
+                    f"{th_overhang.min_value:+.0f}…{th_overhang.max_value:+.0f} мм"
+                )
+                await self.uow.error.add(
+                    Error(
+                        rail_id=rail_id,
+                        screw_id=None,
+                        value_name="mm_overhang",
+                        description=description,
+                        unit_of_measurement=th_overhang.unit_of_measurement,
+                        value=float(value),
+                        min_value=th_overhang.min_value,
+                        max_value=th_overhang.max_value,
+                        is_critical=th_overhang.is_critical,
+                    )
+                )
+                await self._publish_error(
+                    timestamp=(session.last_timestamp if session.last_timestamp else datetime.now()),
+                    description=description,
+                    value_name="mm_overhang",
+                    value=float(value),
+                )
+
         screw_count = await self.uow.screw.count_by_rail(rail_id)
         self.state.set_rail_screw_count(rail_id, screw_count)
 
@@ -1252,6 +1309,11 @@ class SensorService(BaseService):
             side=self._resolve_rail_side_from_session(session),
         )
         update_kwargs["length_mm"] = int(length_mm)
+        # Пишем только непустые: иначе повторная финализация затрёт уже посчитанный забег.
+        if overhang_start is not None:
+            update_kwargs["overhang_start_mm"] = overhang_start
+        if overhang_end is not None:
+            update_kwargs["overhang_end_mm"] = overhang_end
         update_kwargs["resistance_avg"] = self.state.get_resistance_average()
         update_kwargs["temperature_avg"] = self.state.get_temperature_average()
         rmin = self.state.get_resistance_min()
@@ -1279,6 +1341,8 @@ class SensorService(BaseService):
             summary=f"РШР #{rail_id} закрыт: {length_mm} мм, {screw_count} гаек",
             payload={
                 "length_mm": length_mm,
+                "overhang_start_mm": overhang_start,
+                "overhang_end_mm": overhang_end,
                 "screw_count": screw_count,
                 "sleepers": sleepers_value,
                 "side": update_kwargs.get("side").value if update_kwargs.get("side") else None,
@@ -1460,6 +1524,7 @@ class SensorService(BaseService):
         )
         # Первичное отслеживание диапазонов для метрик Sensor1
         active = self.state.get_active_rail()
+        self._capture_rail_edges(data, active)
         current_mm = int(data.values.mm_along_rail)
         self.state.update_gauge(float(data.values.mm_gauge))
         # Запишем первый замер лазерных флагов

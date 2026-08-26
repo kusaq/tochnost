@@ -48,6 +48,12 @@ class Rail(Base, CreateTimestampMixin):
         comment="Метка мягкого удаления; NULL — запись активна",
     )
     length_mm: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="Длина РШР, мм")
+    overhang_start_mm: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Забег в начале РШР (левая нить − правая), мм"
+    )
+    overhang_end_mm: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Забег в конце РШР (левая нить − правая), мм"
+    )
     resistance_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
     resistance_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     resistance_max: Mapped[float | None] = mapped_column(Float, nullable=True)

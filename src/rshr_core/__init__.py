@@ -9,6 +9,7 @@ from rshr_core.rshr_length import (
     segment_length_mm,
     should_discard_rshr,
 )
+from rshr_core.rshr_overhang import OVERHANG_SANITY_MM, overhang_mm, overhangs_from_edges
 from rshr_core.tightening import (
     CompletedCycle,
     CyclePeaks,
@@ -28,6 +29,9 @@ __all__ = [
     "classify_length_mm",
     "RSHR_LENGTH_DISCARD_BELOW_MM",
     "RSHR_LENGTH_MIN_OK_MM",
+    "overhang_mm",
+    "OVERHANG_SANITY_MM",
+    "overhangs_from_edges",
     "has_torque_activity",
     "has_moment_activity",
     "all_torque_zero",

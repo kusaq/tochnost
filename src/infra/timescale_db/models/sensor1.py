@@ -38,6 +38,11 @@ class Sensor1(Base, CreateTimestampMixin):
     mm_bolt_height_right_inner: Mapped[float] = mapped_column("mmBoltHeightRightInner", Float, nullable=False, comment="высота внутреннего болта правого рельса в мм")
     mm_bolt_height_right_outer: Mapped[float] = mapped_column("mmBoltHeightRightOuter", Float, nullable=False, comment="высота внешнего болта правого рельса в мм")
 
+    mm_rail_start_left: Mapped[int | None] = mapped_column("mmRailStartLeft", BigInteger, nullable=True, comment="позиция начала левого рельса в мм (для забега)")
+    mm_rail_start_right: Mapped[int | None] = mapped_column("mmRailStartRight", BigInteger, nullable=True, comment="позиция начала правого рельса в мм (для забега)")
+    mm_rail_end_left: Mapped[int | None] = mapped_column("mmRailEndLeft", BigInteger, nullable=True, comment="позиция конца левого рельса в мм (для забега)")
+    mm_rail_end_right: Mapped[int | None] = mapped_column("mmRailEndRight", BigInteger, nullable=True, comment="позиция конца правого рельса в мм (для забега)")
+
     timestamp: Mapped[datetime] = mapped_column(nullable=False, comment="метка времени измерения")
 
     rail_id: Mapped[int] = mapped_column(

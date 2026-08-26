@@ -35,6 +35,11 @@ class RailSession:
     # (laser_on_rail=False → не открылся), геометрии/длины поста 1 у неё нет.
     # Закрутка реальна → запись не удаляем по правилу «< 15 м» (см. finalize_rail).
     from_post2: bool = False
+    # Последний пакет прохода, где все 4 позиции торцов пришли непустыми.
+    # Порядок: (start_left, start_right, end_left, end_right).
+    # Берём именно ПОСЛЕДНИЙ: прошивка заполняет End только после прохода
+    # торца, в начале прохода там нули.
+    last_rail_edges: tuple[int, int, int, int] | None = None
 
 
 class Sensor1Values(BaseModel):
@@ -110,6 +115,29 @@ class Sensor1Values(BaseModel):
     mm_bolt_height_right_outer: float = Field(
         description="высота внешнего болта правого рельса в мм",
         validation_alias=AliasChoices("mmBoltHeightRightOuter", "mm_bolt_height_right_outer"),
+    )
+
+    # Позиции торцов нитей для забега. Опциональны: прошивка сборщика старее
+    # 08.2026 их не присылает → None → забег не считается (ADR-0010).
+    mm_rail_start_left: int | None = Field(
+        default=None,
+        description="позиция начала левого рельса в мм (для забега)",
+        validation_alias=AliasChoices("mmRailStartLeft", "mm_rail_start_left"),
+    )
+    mm_rail_start_right: int | None = Field(
+        default=None,
+        description="позиция начала правого рельса в мм (для забега)",
+        validation_alias=AliasChoices("mmRailStartRight", "mm_rail_start_right"),
+    )
+    mm_rail_end_left: int | None = Field(
+        default=None,
+        description="позиция конца левого рельса в мм (для забега)",
+        validation_alias=AliasChoices("mmRailEndLeft", "mm_rail_end_left"),
+    )
+    mm_rail_end_right: int | None = Field(
+        default=None,
+        description="позиция конца правого рельса в мм (для забега)",
+        validation_alias=AliasChoices("mmRailEndRight", "mm_rail_end_right"),
     )
 
 
@@ -273,3 +301,8 @@ class Sensor1Read(BaseModel):
     mm_bolt_height_left_outer: float = Field(description="высота внешнего болта левого рельса в мм")
     mm_bolt_height_right_inner: float = Field(description="высота внутреннего болта правого рельса в мм")
     mm_bolt_height_right_outer: float = Field(description="высота внешнего болта правого рельса в мм")
+
+    mm_rail_start_left: int | None = Field(default=None, description="позиция начала левого рельса в мм (для забега)")
+    mm_rail_start_right: int | None = Field(default=None, description="позиция начала правого рельса в мм (для забега)")
+    mm_rail_end_left: int | None = Field(default=None, description="позиция конца левого рельса в мм (для забега)")
+    mm_rail_end_right: int | None = Field(default=None, description="позиция конца правого рельса в мм (для забега)")

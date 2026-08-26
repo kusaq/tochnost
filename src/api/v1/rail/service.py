@@ -108,7 +108,7 @@ class RailService(BaseService):
         return RejectRailResponse(deleted=1, rail_id=rail_id)
 
     async def get_aggregated_metrics(self, rail_id: int) -> list[RailMetricRead]:
-        await self._get_active_rail_or_404(rail_id)
+        rail = await self._get_active_rail_or_404(rail_id)
         s1_list = await self.uow.sensor1.list_by_rail(rail_id=rail_id, limit=100000, offset=0)
         s2_list = await self.uow.sensor2.list_by_rail(rail_id=rail_id)
 
@@ -439,6 +439,24 @@ class RailService(BaseService):
                 )
             )
 
+        # Забег нитей — пер-рельсовая константа, не временной ряд: values=[] осознанно.
+        # Метрику НЕ добавляем, если забега нет (старая прошивка / торец не пойман) —
+        # иначе у всех исторических РШР в карточке появится пустая строка.
+        for disp, attr in (("mmOverhangStart", "overhang_start_mm"), ("mmOverhangEnd", "overhang_end_mm")):
+            overhang_value = getattr(rail, attr, None)
+            if overhang_value is None:
+                continue
+            items.append(
+                RailMetricRead(
+                    rail_id=rail_id,
+                    name=disp,
+                    value=float(overhang_value),
+                    required=required_for("mm_overhang"),
+                    values=[],
+                    note=None,
+                )
+            )
+
         return items
 
     async def export_metrics_excel(self, rail_id: int, metric_names: list[str] | None = None) -> bytes:
@@ -469,6 +487,8 @@ class RailService(BaseService):
             "mmBoltHeightRightInner": "mm_bolt_height_right_inner",
             "mmBoltHeightRightOuter": "mm_bolt_height_right_outer",
             "mmGauge": "mm_gauge",
+            "mmOverhangStart": "mm_overhang",
+            "mmOverhangEnd": "mm_overhang",
             "mmSideWearLeft": "mm_side_wear_left",
             "mmSideWearRight": "mm_side_wear_right",
             "mmVerticalWearLeft": "mm_vertical_wear_left",
